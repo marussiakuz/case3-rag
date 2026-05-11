@@ -1,0 +1,39 @@
+# FAISS индексы — строятся локально через build_indices.py
+rag_pipeline/indices/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+
+# Виртуальные окружения
+.venv/
+venv/
+env/
+
+# Переменные окружения (API-ключи!)
+.env
+.env.local
+*.env
+
+# IDE
+.vscode/
+.idea/
+**/.idea/
+*.swp
+*.iml
+
+# macOS
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Временные файлы
+*.tmp
+*.log

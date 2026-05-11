@@ -1,0 +1,194 @@
+[
+  {
+    "pattern_id": "pagination",
+    "pattern_type": "Пагинация",
+    "description": "Стандартный паттерн пагинации результатов в PostgreSQL",
+    "use_case": "Когда нужно вернуть большой набор данных постранично",
+    "text": "Пагинация в PostgreSQL. LIMIT и OFFSET для постраничного вывода. Всегда добавляй ORDER BY для стабильного порядка при пагинации. Пример: SELECT id, name, sur_name, org_id FROM sys_employee WHERE status = 1 ORDER BY id LIMIT $1 OFFSET $2. Для подсчёта общего числа строк: SELECT COUNT(*) FROM sys_employee WHERE status = 1. Cursor-based пагинация для больших таблиц: WHERE id > $last_id ORDER BY id LIMIT $page_size.",
+    "example": "-- Постраничный вывод сотрудников\nSELECT\n  e.id,\n  e.name,\n  e.sur_name,\n  e.first_name,\n  e.org_id\nFROM sys_employee e\nWHERE e.status = 1\nORDER BY e.id\nLIMIT $1 OFFSET $2;"
+  },
+  {
+    "pattern_id": "join_basic",
+    "pattern_type": "JOIN",
+    "description": "JOIN нескольких таблиц GreenData через внешние ключи",
+    "use_case": "Когда нужно объединить данные из связанных таблиц",
+    "text": "JOIN таблиц в PostgreSQL. Используй INNER JOIN для обязательных связей, LEFT JOIN когда связанная запись может отсутствовать. Связи в GreenData: sys_employee.org_id → sys_company.id, scp_application.state_id → sys_state.id, scp_project_ans.credit_analyst_id → sys_employee.id, scp_project_ans.loan_type_id → type_loan.id. Всегда используй алиасы таблиц для читаемости.",
+    "example": "-- Заявки с состоянием и ответственным аналитиком\nSELECT\n  sa.id AS application_id,\n  sa.create_date,\n  ss.name AS state_name,\n  e.name AS analyst_name,\n  e.sur_name AS analyst_surname\nFROM scp_application sa\nINNER JOIN sys_state ss ON ss.id = sa.state_id\nLEFT JOIN sys_employee e ON e.id = sa.credit_logic_id\nWHERE sa.status = 1\nORDER BY sa.create_date DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "aggregate_groupby",
+    "pattern_type": "Агрегация и GROUP BY",
+    "description": "Подсчёт, суммирование и группировка данных",
+    "use_case": "Отчёты, статистика, сводные данные",
+    "text": "Агрегатные функции PostgreSQL: COUNT(), SUM(), AVG(), MIN(), MAX(). GROUP BY для группировки. HAVING для фильтрации групп. Порядок: WHERE фильтрует строки до группировки, HAVING фильтрует группы после. Пример группировки по статусу заявок с подсчётом.",
+    "example": "-- Количество заявок по статусам за период\nSELECT\n  ss.name AS state_name,\n  COUNT(sa.id) AS application_count,\n  MIN(sa.create_date) AS first_date,\n  MAX(sa.create_date) AS last_date\nFROM scp_application sa\nINNER JOIN sys_state ss ON ss.id = sa.state_id\nWHERE sa.create_date >= $1\n  AND sa.create_date < $2\nGROUP BY ss.id, ss.name\nHAVING COUNT(sa.id) > 0\nORDER BY application_count DESC;"
+  },
+  {
+    "pattern_id": "window_functions",
+    "pattern_type": "Оконные функции",
+    "description": "ROW_NUMBER, RANK, LAG/LEAD, SUM OVER для аналитических запросов",
+    "use_case": "Нумерация строк, ранжирование, накопительные итоги, сравнение с предыдущей строкой",
+    "text": "Оконные функции PostgreSQL (Window Functions). ROW_NUMBER() OVER (PARTITION BY col ORDER BY col) - нумерация внутри группы. RANK() и DENSE_RANK() - ранжирование. SUM() OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN ...) - нарастающий итог. LAG(col, 1) OVER (...) - значение из предыдущей строки. Оконные функции не изменяют количество строк в результате.",
+    "example": "-- Нарастающий итог оборотов по счёту\nSELECT\n  account_date,\n  after_amount,\n  SUM(after_amount) OVER (\n    PARTITION BY account_num_id\n    ORDER BY account_date\n    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n  ) AS cumulative_amount,\n  ROW_NUMBER() OVER (\n    PARTITION BY account_num_id\n    ORDER BY account_date\n  ) AS row_num\nFROM afhd_ac_trans_link\nWHERE account_num_id = $1\n  AND account_date >= $2\nORDER BY account_date\nLIMIT 1000;"
+  },
+  {
+    "pattern_id": "cte",
+    "pattern_type": "CTE (WITH)",
+    "description": "Common Table Expressions для структурирования сложных запросов",
+    "use_case": "Разбить сложный запрос на читаемые шаги, повторное использование подзапроса",
+    "text": "CTE (Common Table Expression) в PostgreSQL через WITH. Делает сложные запросы читаемыми. WITH cte_name AS (SELECT ...) SELECT ... FROM cte_name. Можно создавать несколько CTE через запятую. Рекурсивные CTE через WITH RECURSIVE для иерархических данных. CTE с MATERIALIZED или NOT MATERIALIZED для управления оптимизацией.",
+    "example": "-- CTE: активные заявки с данными клиента и аналитика\nWITH active_applications AS (\n  SELECT\n    sa.id,\n    sa.create_date,\n    sa.state_id,\n    sa.credit_logic_id\n  FROM scp_application sa\n  WHERE sa.status = 1\n    AND sa.create_date >= CURRENT_DATE - INTERVAL '30 days'\n),\nanalyst_info AS (\n  SELECT\n    e.id,\n    e.name || ' ' || e.sur_name AS full_name,\n    e.org_id\n  FROM sys_employee e\n  WHERE e.status = 1\n)\nSELECT\n  aa.id AS app_id,\n  aa.create_date,\n  ss.name AS state,\n  ai.full_name AS analyst\nFROM active_applications aa\nLEFT JOIN sys_state ss ON ss.id = aa.state_id\nLEFT JOIN analyst_info ai ON ai.id = aa.credit_logic_id\nORDER BY aa.create_date DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "date_filter",
+    "pattern_type": "Фильтрация по дате",
+    "description": "Работа с timestamp и date в PostgreSQL",
+    "use_case": "Запросы за период, последние N дней, конкретная дата",
+    "text": "Работа с датами в PostgreSQL. CURRENT_DATE - текущая дата. CURRENT_TIMESTAMP или NOW() - текущий момент. INTERVAL для прибавления периодов: NOW() - INTERVAL '30 days'. DATE_TRUNC для округления: DATE_TRUNC('month', create_date). EXTRACT для извлечения части: EXTRACT(YEAR FROM create_date). В GreenData поля типа timestamp without time zone: create_date, last_modified_date, account_date, credit_start_date.",
+    "example": "-- Заявки за последние 30 дней\nSELECT\n  id,\n  create_date,\n  state_id\nFROM scp_application\nWHERE create_date >= CURRENT_DATE - INTERVAL '30 days'\n  AND create_date < CURRENT_DATE + INTERVAL '1 day'\nORDER BY create_date DESC\nLIMIT 500;\n\n-- Группировка по месяцам\nSELECT\n  DATE_TRUNC('month', create_date) AS month,\n  COUNT(*) AS count\nFROM scp_application\nGROUP BY DATE_TRUNC('month', create_date)\nORDER BY month;"
+  },
+  {
+    "pattern_id": "subquery_exists",
+    "pattern_type": "Подзапросы и EXISTS",
+    "description": "EXISTS как замена IN для проверки существования связанных записей",
+    "use_case": "Фильтрация по наличию/отсутствию связанных данных",
+    "text": "EXISTS vs IN в PostgreSQL. EXISTS быстрее IN для больших подзапросов. EXISTS возвращает true как только найдена первая подходящая строка. NOT EXISTS для отрицательной фильтрации. Коррелированный подзапрос через WHERE EXISTS (SELECT 1 FROM ... WHERE outer.id = inner.ref_id). В большинстве случаев JOIN эффективнее EXISTS для получения данных, но EXISTS лучше для простой проверки наличия.",
+    "example": "-- Компании у которых есть активные кредитные договоры\nSELECT\n  c.id,\n  c.name,\n  c.short_name\nFROM sys_company c\nWHERE EXISTS (\n  SELECT 1\n  FROM credit_contract cc\n  WHERE cc.org_id = c.id\n    AND cc.status = 1\n)\nORDER BY c.name\nLIMIT 100;\n\n-- Сотрудники без назначенных заявок\nSELECT e.id, e.name, e.sur_name\nFROM sys_employee e\nWHERE NOT EXISTS (\n  SELECT 1 FROM scp_project_ans spa\n  WHERE spa.credit_analyst_id = e.id\n);"
+  },
+  {
+    "pattern_id": "null_handling",
+    "pattern_type": "Работа с NULL",
+    "description": "COALESCE, IS NULL, NULLIF для корректной обработки NULL-значений",
+    "use_case": "Когда поля могут быть NULL (nullable=true в схеме)",
+    "text": "NULL в PostgreSQL. NULL != NULL, для проверки: IS NULL / IS NOT NULL. COALESCE(val, default) - первое не-NULL значение. NULLIF(val, other) - возвращает NULL если val = other. В GreenData большинство полей nullable. При JOIN LEFT JOIN возвращает NULL для отсутствующих строк. В агрегатах COUNT(*) считает все строки, COUNT(col) игнорирует NULL.",
+    "example": "-- Корректная обработка nullable полей\nSELECT\n  e.id,\n  COALESCE(e.name__ru, e.name, 'Не указано') AS display_name,\n  COALESCE(e.sur_name, '') || ' ' || COALESCE(e.first_name, '') AS full_name,\n  CASE\n    WHEN e.email IS NULL THEN 'email не указан'\n    ELSE 'есть email'\n  END AS email_status\nFROM sys_employee e\nWHERE e.status = 1\nORDER BY e.id\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "distinct_dedup",
+    "pattern_type": "Дедупликация и DISTINCT",
+    "description": "Устранение дубликатов в результатах",
+    "use_case": "Когда JOIN создаёт дубликаты или нужны уникальные значения",
+    "text": "DISTINCT в PostgreSQL. SELECT DISTINCT col - уникальные значения одной колонки. SELECT DISTINCT col1, col2 - уникальные комбинации. DISTINCT ON (col) - PostgreSQL расширение: первая строка в группе по col. Предпочитай GROUP BY вместо DISTINCT для агрегаций. DISTINCT ON требует ORDER BY с теми же колонками.",
+    "example": "-- Уникальные статусы заявок\nSELECT DISTINCT state_id FROM scp_application WHERE status = 1;\n\n-- DISTINCT ON: последняя версия заявки по каждой компании\nSELECT DISTINCT ON (sa.org_id)\n  sa.id,\n  sa.org_id,\n  sa.create_date,\n  sa.state_id\nFROM scp_application sa\nWHERE sa.status = 1\nORDER BY sa.org_id, sa.create_date DESC;"
+  },
+  {
+    "pattern_id": "full_text_search",
+    "pattern_type": "Поиск по строкам",
+    "description": "ILIKE, LIKE, полнотекстовый поиск для поиска по текстовым полям",
+    "use_case": "Поиск сотрудников, компаний, заявок по имени или другому текстовому полю",
+    "text": "Поиск строк в PostgreSQL. LIKE для шаблонного поиска, ILIKE регистронезависимый. % - любые символы, _ - один символ. ILIKE '%поиск%' медленно на больших таблицах без индекса. Для быстрого поиска: индекс GIN/GIST или pg_trgm. Для точного совпадения = быстрее чем LIKE. Параметризованный LIKE: WHERE name ILIKE '%' || $1 || '%'.",
+    "example": "-- Поиск сотрудников по фамилии\nSELECT\n  id,\n  sur_name,\n  first_name,\n  name,\n  org_id\nFROM sys_employee\nWHERE sur_name ILIKE '%' || $1 || '%'\n  AND status = 1\nORDER BY sur_name, first_name\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "explain_analyze",
+    "pattern_type": "Анализ производительности",
+    "description": "EXPLAIN и EXPLAIN ANALYZE для диагностики медленных запросов",
+    "use_case": "Оценка плана выполнения запроса без реального запуска",
+    "text": "EXPLAIN в PostgreSQL. EXPLAIN SELECT ... - показывает план без выполнения. EXPLAIN ANALYZE SELECT ... - выполняет и показывает реальную статистику. Seq Scan - полное сканирование таблицы (медленно на больших таблицах без WHERE). Index Scan - использует индекс (быстро). Nested Loop - join через вложенный цикл. Hash Join - join через хэш-таблицу. cost=start..total rows=N width=N в выводе EXPLAIN.",
+    "example": "-- Анализ плана без выполнения запроса\nEXPLAIN\nSELECT e.id, e.name, e.sur_name\nFROM sys_employee e\nINNER JOIN sys_company c ON c.id = e.org_id\nWHERE e.status = 1\n  AND c.status = 1\nORDER BY e.sur_name\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "insert_returning",
+    "pattern_type": "INSERT с RETURNING",
+    "description": "Вставка данных с возвратом сгенерированных значений",
+    "use_case": "Получить id или другие auto-generated поля после INSERT",
+    "text": "INSERT с RETURNING в PostgreSQL. Позволяет получить сгенерированные значения (id, created_at) без отдельного SELECT. INSERT INTO table (...) VALUES (...) RETURNING id. Можно возвращать любые поля. INSERT ... ON CONFLICT DO UPDATE (UPSERT). INSERT ... SELECT для вставки из другой таблицы.",
+    "example": "-- Вставка с возвратом id\nINSERT INTO application_obj (\n  type_id,\n  status,\n  create_date,\n  org_id,\n  user_id\n)\nVALUES ($1, 1, CURRENT_TIMESTAMP, $2, $3)\nRETURNING id, create_date;"
+  },
+  {
+    "pattern_id": "transaction_safety",
+    "pattern_type": "Безопасные транзакции",
+    "description": "BEGIN/COMMIT/ROLLBACK и SAVEPOINT для атомарных операций",
+    "use_case": "Когда нужно выполнить несколько связанных операций как единое целое",
+    "text": "Транзакции в PostgreSQL. BEGIN - начало транзакции. COMMIT - фиксация. ROLLBACK - откат. SAVEPOINT name - точка сохранения внутри транзакции. ROLLBACK TO SAVEPOINT name - откат до точки сохранения. Изоляция: READ COMMITTED (default), REPEATABLE READ, SERIALIZABLE. FOR UPDATE в SELECT - блокировка строк для последующего обновления.",
+    "example": "-- Атомарное обновление статуса заявки\nBEGIN;\n\nUPDATE scp_application\nSET state_id = $2,\n    last_modified_date = CURRENT_TIMESTAMP,\n    last_modified_user_id = $3\nWHERE id = $1\n  AND status = 1;\n\nINSERT INTO sys_obj_resp (obj_id, ...)\nVALUES ($1, ...);\n\nCOMMIT;"
+  },
+  {
+    "pattern_id": "greendata_common_tables",
+    "pattern_type": "Часто используемые таблицы GreenData",
+    "description": "Справочник основных таблиц и их назначение в схеме GreenData",
+    "use_case": "Понимание структуры предметной области при написании запросов",
+    "text": "Основные таблицы GreenData. sys_employee - сотрудники: id, name, sur_name, first_name, org_id, status, email, phone. sys_company - компании и контрагенты: id, name, short_name, inn, status, business_segment. sys_state - справочник статусов/состояний: id, name. type_loan - типы кредитов: id, name. credit_contract - кредитные договоры: id, credit_contract_number, credit_amount, credit_start_date, credit_end_date, org_id, status. scp_application - кредитные заявки: id, create_date, state_id, status, org_id, credit_logic_id. scp_project_ans - проектный анализ заявок: id, credit_analyst_id, loan_type_id, scp_subl_bor, state_id. afhd_ac_trans_link - финансовые транзакции: id, account_date, after_amount, before_amount, account_num_id. acc_number - номера счетов: id, name, account_name, org_id. sys_algorithm - алгоритмы: id, name. fs_file - файлы: id, name. Связи: большинство таблиц связаны с sys_employee через user_id/created_emp_id и с sys_company через org_id.",
+    "example": "-- Типичный запрос по схеме GreenData:\n-- Кредитные заявки с компанией-заёмщиком и состоянием\nSELECT\n  sa.id AS app_id,\n  sa.create_date,\n  c.name AS company_name,\n  c.inn,\n  ss.name AS current_state,\n  e.sur_name || ' ' || e.first_name AS analyst\nFROM scp_application sa\nINNER JOIN sys_company c ON c.id = sa.org_id\nINNER JOIN sys_state ss ON ss.id = sa.state_id\nLEFT JOIN sys_employee e ON e.id = sa.credit_logic_id\nWHERE sa.status = 1\n  AND sa.create_date >= $1\nORDER BY sa.create_date DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "multi_join_greendata",
+    "pattern_type": "Многотабличный JOIN (GreenData)",
+    "description": "Типичный запрос по 4+ таблицам GreenData: заявка + компания + сотрудник + статус",
+    "use_case": "Отчёты по кредитным заявкам с данными заёмщика, аналитика и текущего состояния",
+    "text": "Многотабличный JOIN в схеме GreenData. Типичные связи: scp_application.org_id → sys_company.id (компания-заёмщик), scp_application.state_id → sys_state.id (статус заявки), scp_application.credit_logic_id → sys_employee.id (ответственный аналитик), scp_project_ans.loan_type_id → type_loan.id (тип кредита). Использовать LEFT JOIN для опциональных связей (аналитик может быть не назначен), INNER JOIN для обязательных (статус есть всегда).",
+    "example": "-- Заявки с компанией, аналитиком, статусом и типом кредита\nSELECT\n  sa.id               AS application_id,\n  sa.create_date,\n  c.name              AS company_name,\n  c.short_name        AS company_short,\n  ss.name             AS state_name,\n  e.sur_name || ' ' || COALESCE(e.first_name, '') AS analyst_name,\n  tl.name             AS loan_type\nFROM scp_application sa\nINNER JOIN sys_company  c  ON c.id  = sa.org_id\nINNER JOIN sys_state    ss ON ss.id = sa.state_id\nLEFT  JOIN sys_employee e  ON e.id  = sa.credit_logic_id\nLEFT  JOIN scp_project_ans spa ON spa.req_link_id = sa.id\nLEFT  JOIN type_loan    tl ON tl.id = spa.loan_type_id\nWHERE sa.status = 1\n  AND sa.create_date >= $1\nORDER BY sa.create_date DESC\nLIMIT $2 OFFSET $3;"
+  },
+  {
+    "pattern_id": "credit_analytics",
+    "pattern_type": "Аналитика кредитных заявок",
+    "description": "Агрегация по кредитным заявкам: суммы, количество, разбивка по типам и статусам",
+    "use_case": "Управленческая отчётность по кредитному портфелю GreenData",
+    "text": "Аналитические запросы по кредитному портфелю в GreenData. Таблицы: credit_contract (действующие договоры), scp_application (заявки), scp_project_ans (проектный анализ с суммами). Группировка по sys_state, type_loan, sys_company. Суммирование по exp_limit_credit_rub. NEVER запрашивать credit_amount, uid_credit, credit_contract_number без явной необходимости — sensitive поля.",
+    "example": "-- Сводка заявок по статусам с суммами лимитов\nSELECT\n  ss.name                          AS state_name,\n  COUNT(sa.id)                     AS app_count,\n  SUM(spa.exp_limit_credit_rub)    AS total_limit_rub,\n  AVG(spa.exp_limit_credit_rub)    AS avg_limit_rub,\n  MIN(sa.create_date)              AS earliest_app,\n  MAX(sa.create_date)              AS latest_app\nFROM scp_application sa\nINNER JOIN sys_state ss       ON ss.id = sa.state_id\nLEFT  JOIN scp_project_ans spa ON spa.req_link_id = sa.id\nWHERE sa.status = 1\n  AND sa.create_date BETWEEN $1 AND $2\nGROUP BY ss.id, ss.name\nHAVING COUNT(sa.id) > 0\nORDER BY app_count DESC;"
+  },
+  {
+    "pattern_id": "employee_org_report",
+    "pattern_type": "Отчёт по сотрудникам и подразделениям",
+    "description": "Запросы по сотрудникам с привязкой к подразделениям (sys_employee → sys_company)",
+    "use_case": "HR-отчёты, нагрузка аналитиков, список по подразделению",
+    "text": "Запросы по сотрудникам в GreenData. sys_employee связан с sys_company через org_id (подразделение) и emp_org_id (офис сотрудника). Никогда не включать email, phone, inner_emp_phone без необходимости — sensitive поля. Для ФИО использовать: e.sur_name || ' ' || COALESCE(e.first_name, '') || ' ' || COALESCE(e.second_name, ''). Фильтр по активным: WHERE e.status = 1.",
+    "example": "-- Список активных сотрудников с подразделением\nSELECT\n  e.id,\n  e.sur_name,\n  e.first_name,\n  e.second_name,\n  c.name  AS department_name,\n  c.short_name AS department_short\nFROM sys_employee e\nINNER JOIN sys_company c ON c.id = e.org_id\nWHERE e.status = 1\n  AND c.status = 1\nORDER BY c.name, e.sur_name, e.first_name\nLIMIT $1 OFFSET $2;\n\n-- Количество активных заявок на аналитика\nSELECT\n  e.id,\n  e.sur_name || ' ' || COALESCE(e.first_name, '') AS analyst,\n  COUNT(sa.id) AS active_applications\nFROM sys_employee e\nLEFT JOIN scp_application sa\n  ON sa.credit_logic_id = e.id AND sa.status = 1\nWHERE e.status = 1\nGROUP BY e.id, e.sur_name, e.first_name\nORDER BY active_applications DESC\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "update_with_cte",
+    "pattern_type": "UPDATE через CTE",
+    "description": "Обновление данных с использованием CTE для сложных условий",
+    "use_case": "Массовое обновление статусов или полей по сложному критерию",
+    "text": "UPDATE через CTE в PostgreSQL. Позволяет обновить записи на основе сложной выборки. WITH cte AS (SELECT ...) UPDATE table SET col = val FROM cte WHERE table.id = cte.id. Всегда проверять: UPDATE должен содержать WHERE. Предпочтительно фильтровать по id из CTE.",
+    "example": "-- Обновление статуса заявок старше 90 дней в состоянии 'Черновик'\nWITH stale_apps AS (\n  SELECT sa.id\n  FROM scp_application sa\n  INNER JOIN sys_state ss ON ss.id = sa.state_id\n  WHERE ss.name ILIKE '%черновик%'\n    AND sa.create_date < CURRENT_DATE - INTERVAL '90 days'\n    AND sa.status = 1\n)\nUPDATE scp_application\nSET status = 0,\n    last_modified_date = CURRENT_TIMESTAMP\nFROM stale_apps\nWHERE scp_application.id = stale_apps.id\nRETURNING scp_application.id, scp_application.create_date;"
+  },
+  {
+    "pattern_id": "window_rank_per_group",
+    "pattern_type": "Ранжирование внутри группы (PARTITION BY)",
+    "description": "ROW_NUMBER / RANK для нахождения первой/последней/топ-N записей внутри группы",
+    "use_case": "Последняя заявка по каждой компании, топ аналитиков по подразделению",
+    "text": "PARTITION BY для ранжирования внутри группы в PostgreSQL. ROW_NUMBER() OVER (PARTITION BY group_col ORDER BY sort_col DESC) = 1 даёт первую запись группы. Используется в подзапросе: SELECT * FROM (SELECT ..., ROW_NUMBER() OVER (...) AS rn FROM ...) t WHERE t.rn = 1. DISTINCT ON — более компактная альтернатива для простых случаев.",
+    "example": "-- Последняя заявка по каждой компании\nSELECT\n  app_id,\n  company_id,\n  company_name,\n  create_date,\n  state_name\nFROM (\n  SELECT\n    sa.id          AS app_id,\n    c.id           AS company_id,\n    c.name         AS company_name,\n    sa.create_date,\n    ss.name        AS state_name,\n    ROW_NUMBER() OVER (\n      PARTITION BY c.id\n      ORDER BY sa.create_date DESC\n    ) AS rn\n  FROM scp_application sa\n  INNER JOIN sys_company c  ON c.id  = sa.org_id\n  INNER JOIN sys_state   ss ON ss.id = sa.state_id\n  WHERE sa.status = 1\n) ranked\nWHERE rn = 1\nORDER BY create_date DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "financial_transactions",
+    "pattern_type": "Финансовые транзакции (afhd_ac_trans_link)",
+    "description": "Запросы по таблице финансовых транзакций с агрегацией оборотов",
+    "use_case": "Анализ оборотов по счетам, сводка по периодам, динамика балансов",
+    "text": "Таблица afhd_ac_trans_link содержит финансовые транзакции. Ключевые поля: account_date (дата), after_amount / before_amount (остатки), account_num_id → acc_number.id (счёт). ВАЖНО: всегда фильтровать по account_date и account_num_id — таблица может содержать миллионы строк. Обязателен LIMIT. Поле debit_credit_id помечено как sensitive — не включать без необходимости.",
+    "example": "-- Обороты по счёту за период\nSELECT\n  DATE_TRUNC('month', t.account_date) AS month,\n  an.account_name                     AS account,\n  COUNT(t.id)                         AS transaction_count,\n  SUM(t.after_amount)                 AS total_after,\n  AVG(t.after_amount)                 AS avg_balance\nFROM afhd_ac_trans_link t\nINNER JOIN acc_number an ON an.id = t.account_num_id\nWHERE t.account_num_id = $1\n  AND t.account_date >= $2\n  AND t.account_date <  $3\nGROUP BY DATE_TRUNC('month', t.account_date), an.account_name\nORDER BY month\nLIMIT 24;"
+  },
+  {
+    "pattern_id": "upsert_on_conflict",
+    "pattern_type": "UPSERT (INSERT ON CONFLICT)",
+    "description": "Вставка с обновлением при конфликте уникального ключа",
+    "use_case": "Синхронизация справочников, идемпотентная запись",
+    "text": "INSERT ... ON CONFLICT в PostgreSQL (UPSERT). ON CONFLICT (col) DO UPDATE SET col = EXCLUDED.col. ON CONFLICT DO NOTHING для пропуска дублей. EXCLUDED — псевдотаблица со значениями из INSERT. Используется для идемпотентного обновления справочников.",
+    "example": "-- Идемпотентное обновление записи в sys_state\nINSERT INTO sys_state (id, name, type_id, status, org_id, user_id, create_date)\nVALUES ($1, $2, $3, 1, $4, $5, CURRENT_TIMESTAMP)\nON CONFLICT (id) DO UPDATE SET\n  name             = EXCLUDED.name,\n  last_modified_date = CURRENT_TIMESTAMP,\n  last_modified_user_id = EXCLUDED.user_id\nRETURNING id, name;"
+  },
+  {
+    "pattern_id": "plpgsql_function",
+    "pattern_type": "PL/pgSQL функция (безопасная)",
+    "description": "Шаблон хранимой функции на PL/pgSQL с безопасным динамическим SQL",
+    "use_case": "Инкапсуляция бизнес-логики, переиспользуемые процедуры",
+    "text": "Безопасная PL/pgSQL функция в PostgreSQL. Параметры передавать через USING в EXECUTE. Для имён таблиц/колонок использовать format() с %I. Никогда не строить SQL через конкатенацию с пользовательскими данными. RETURNS TABLE для набора строк, RETURNS void для процедур. EXCEPTION блок для обработки ошибок. SECURITY INVOKER (по умолчанию) безопаснее SECURITY DEFINER.",
+    "example": "-- Безопасная функция: активные заявки компании по периоду\nCREATE OR REPLACE FUNCTION get_company_applications(\n  p_company_id bigint,\n  p_date_from  timestamp,\n  p_date_to    timestamp,\n  p_limit      int DEFAULT 100\n)\nRETURNS TABLE (\n  app_id      bigint,\n  create_date timestamp,\n  state_name  varchar\n)\nLANGUAGE plpgsql\nAS $$\nBEGIN\n  RETURN QUERY\n  SELECT\n    sa.id,\n    sa.create_date,\n    ss.name\n  FROM scp_application sa\n  INNER JOIN sys_state ss ON ss.id = sa.state_id\n  WHERE sa.org_id = p_company_id\n    AND sa.status = 1\n    AND sa.create_date >= p_date_from\n    AND sa.create_date <  p_date_to\n  ORDER BY sa.create_date DESC\n  LIMIT p_limit;\nEND;\n$$;"
+  },
+  {
+    "pattern_id": "lateral_join",
+    "pattern_type": "LATERAL JOIN",
+    "description": "LATERAL для коррелированных подзапросов в FROM",
+    "use_case": "Топ-N записей на каждую строку внешней таблицы",
+    "text": "LATERAL JOIN в PostgreSQL. Позволяет подзапросу в FROM ссылаться на столбцы внешней таблицы. Используется для топ-N на группу без оконных функций. CROSS JOIN LATERAL или LEFT JOIN LATERAL ... ON true. Эффективнее коррелированного подзапроса в SELECT для нескольких колонок.",
+    "example": "-- Последние 3 заявки для каждой из топ-10 компаний\nSELECT\n  c.id            AS company_id,\n  c.name          AS company_name,\n  recent.app_id,\n  recent.create_date,\n  recent.state_name\nFROM (\n  SELECT id, name FROM sys_company\n  WHERE status = 1\n  ORDER BY id\n  LIMIT 10\n) c\nCROSS JOIN LATERAL (\n  SELECT\n    sa.id           AS app_id,\n    sa.create_date,\n    ss.name         AS state_name\n  FROM scp_application sa\n  INNER JOIN sys_state ss ON ss.id = sa.state_id\n  WHERE sa.org_id = c.id\n    AND sa.status = 1\n  ORDER BY sa.create_date DESC\n  LIMIT 3\n) recent\nORDER BY c.name, recent.create_date DESC;"
+  },
+  {
+    "pattern_id": "masking_sensitive",
+    "pattern_type": "Маскирование sensitive-полей",
+    "description": "Частичное скрытие персональных данных при необходимости их вывода",
+    "use_case": "Отчёты где поле нужно показать, но не полностью (email, phone, inn)",
+    "text": "Маскирование sensitive данных в PostgreSQL. Для email: REGEXP_REPLACE(email, '(.).+(@.+)', '\\1***\\2') или LEFT(email, 3) || '***' || SUBSTRING(email FROM POSITION('@' IN email)). Для телефона: LEFT(phone, 3) || '***' || RIGHT(phone, 2). Для ИНН (10-12 цифр): LEFT(inn, 3) || '****' || RIGHT(inn, 2). Маскировать, когда поле нужно показать частично для идентификации, но полные данные не нужны.",
+    "example": "-- Список сотрудников с маскированным email и телефоном\nSELECT\n  e.id,\n  e.sur_name,\n  e.first_name,\n  -- Маскируем: show***@domain.com\n  CASE\n    WHEN e.email IS NULL THEN NULL\n    ELSE LEFT(e.email, 3) || '***' ||\n         SUBSTRING(e.email FROM POSITION('@' IN e.email))\n  END AS email_masked,\n  -- Маскируем телефон: +7***99\n  CASE\n    WHEN e.phone IS NULL THEN NULL\n    ELSE LEFT(e.phone, 2) || '****' || RIGHT(e.phone, 2)\n  END AS phone_masked\nFROM sys_employee e\nWHERE e.status = 1\nORDER BY e.sur_name\nLIMIT $1 OFFSET $2;"
+  }
+]
