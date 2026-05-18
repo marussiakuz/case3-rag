@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from cerebras.cloud.sdk import Cerebras
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from baseline1 import AuditResult, SecurityAuditor, Vulnerability
 from rag_pipeline.rag_tools import get_security_context, get_sensitive_fields
 
-MODEL = "qwen-3-235b-a22b-instruct-2507"
+MODEL = os.getenv("OPENROUTER_MODEL", "qwen/qwen3-235b-a22b")
 TEMPERATURE = 0.0   # аудит должен быть детерминированным
 MAX_TOKENS = 512
 
@@ -146,7 +146,10 @@ class GroqSecurityAuditor(SecurityAuditor):
         super().__init__(**kwargs)
         self.model = model
         self.temperature = temperature
-        self._client = Cerebras(api_key=os.getenv("CEREBRAS_API_KEY"))
+        self._client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.getenv("OPENROUTER_API_KEY"),
+        )
         self._sensitive_fields = get_sensitive_fields()
         self.last_usage: dict = {}
 
@@ -173,7 +176,7 @@ class GroqSecurityAuditor(SecurityAuditor):
             sensitive_fields=self._sensitive_fields,
         )
 
-        raw_response = self._client.chat.completions.with_raw_response.create(
+        response = self._client.chat.completions.create(
             model=self.model,
             temperature=self.temperature,
             max_tokens=MAX_TOKENS,
@@ -183,24 +186,13 @@ class GroqSecurityAuditor(SecurityAuditor):
                 {"role": "user", "content": user_prompt},
             ],
         )
-        response = raw_response.parse()
 
         usage = getattr(response, "usage", None)
-        remaining = None
-        for key in ("x-ratelimit-remaining-tokens", "x-ratelimit-remaining",
-                    "ratelimit-remaining-tokens", "ratelimit-remaining"):
-            val = raw_response.headers.get(key)
-            if val is not None:
-                try:
-                    remaining = int(val)
-                    break
-                except (ValueError, TypeError):
-                    pass
         self.last_usage = {
             "prompt_tokens":     getattr(usage, "prompt_tokens",     0) or 0 if usage else 0,
             "completion_tokens": getattr(usage, "completion_tokens", 0) or 0 if usage else 0,
             "total_tokens":      getattr(usage, "total_tokens",      0) or 0 if usage else 0,
-            "remaining_tokens":  remaining,
+            "remaining_tokens":  None,
         }
         raw = response.choices[0].message.content or "{}"
         return _parse_response(raw, sql_query)

@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from cerebras.cloud.sdk import Cerebras
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -28,9 +28,7 @@ from baseline1 import AuditResult, SQLGenerator
 from rag_pipeline.rag_tools import get_generation_context, get_solutions_context
 
 ROOT = Path(__file__).parent.parent
-# Можно переопределить через переменную окружения:
-# CEREBRAS_MODEL=qwen-3-235b-a22b-instruct-2507 .venv/bin/python ...
-MODEL = os.getenv("CEREBRAS_MODEL", "qwen-3-235b-a22b-instruct-2507")
+MODEL = os.getenv("OPENROUTER_MODEL", "qwen/qwen3-235b-a22b")
 TEMPERATURE = 0.1
 MAX_TOKENS = 512  # SQL не длиннее 512 токенов — ограничивает thinking mode Qwen3
 
@@ -119,18 +117,6 @@ def _build_user_prompt(
     return "\n".join(parts)
 
 
-def _parse_remaining(headers) -> int | None:
-    """Читает остаток токенов из HTTP-заголовков ответа Cerebras."""
-    for key in ("x-ratelimit-remaining-tokens", "x-ratelimit-remaining",
-                "ratelimit-remaining-tokens", "ratelimit-remaining"):
-        val = headers.get(key)
-        if val is not None:
-            try:
-                return int(val)
-            except (ValueError, TypeError):
-                pass
-    return None
-
 def _clean_sql(raw: str) -> str:
     """Убирает markdown-блоки, точки с запятой и лишние пробелы из ответа модели."""
     cleaned = re.sub(r"```(?:sql)?", "", raw, flags=re.IGNORECASE)
@@ -142,11 +128,11 @@ def _clean_sql(raw: str) -> str:
 
 class GroqSQLGenerator(SQLGenerator):
     """
-    Реализация SQLGenerator на базе Cerebras API (Llama 3.3 70B).
+    Реализация SQLGenerator на базе OpenRouter API (Qwen3 235B).
 
     Args:
         db_schema: схема БД (не используется напрямую — RAG обращается к schema.json)
-        model: название модели Cerebras (по умолчанию llama-3.3-70b)
+        model: название модели OpenRouter
         temperature: температура генерации (по умолчанию 0.1 для детерминизма)
     """
 
@@ -160,7 +146,10 @@ class GroqSQLGenerator(SQLGenerator):
         super().__init__(db_schema=db_schema, **kwargs)
         self.model = model
         self.temperature = temperature
-        self._client = Cerebras(api_key=os.getenv("CEREBRAS_API_KEY"))
+        self._client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.getenv("OPENROUTER_API_KEY"),
+        )
         self.last_usage: dict = {}
         print(f"  [Generator] модель: {self.model}")
 
@@ -195,7 +184,7 @@ class GroqSQLGenerator(SQLGenerator):
             solutions_context=solutions_context,
         )
 
-        raw_response = self._client.chat.completions.with_raw_response.create(
+        response = self._client.chat.completions.create(
             model=self.model,
             temperature=self.temperature,
             max_tokens=MAX_TOKENS,
@@ -204,14 +193,13 @@ class GroqSQLGenerator(SQLGenerator):
                 {"role": "user", "content": user_prompt},
             ],
         )
-        response = raw_response.parse()
 
         usage = getattr(response, "usage", None)
         self.last_usage = {
             "prompt_tokens":     getattr(usage, "prompt_tokens",     0) or 0 if usage else 0,
             "completion_tokens": getattr(usage, "completion_tokens", 0) or 0 if usage else 0,
             "total_tokens":      getattr(usage, "total_tokens",      0) or 0 if usage else 0,
-            "remaining_tokens":  _parse_remaining(raw_response.headers),
+            "remaining_tokens":  None,
         }
         raw = response.choices[0].message.content or ""
         return _clean_sql(raw)

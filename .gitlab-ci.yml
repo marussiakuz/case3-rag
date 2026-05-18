@@ -54,8 +54,8 @@ deploy:
         --exclude='rag_pipeline/indices/' \
         . "$YC_VM_USER@$YC_VM_HOST:$APP_DIR/"
     - |
-      printf 'CEREBRAS_API_KEY=%s\nGROQ_API_KEY=%s\nPG_PASSWORD=%s\nPG_HOST=localhost\nPG_PORT=5432\nPG_USER=postgres\n' \
-        "$CEREBRAS_API_KEY" "$GROQ_API_KEY" "$PG_PASSWORD" | \
+      printf 'CEREBRAS_API_KEY=%s\nGROQ_API_KEY=%s\nOPENROUTER_API_KEY=%s\nPG_PASSWORD=%s\nPG_HOST=localhost\nPG_PORT=5432\nPG_USER=postgres\n' \
+        "$CEREBRAS_API_KEY" "$GROQ_API_KEY" "$OPENROUTER_API_KEY" "$PG_PASSWORD" | \
         ssh "$YC_VM_USER@$YC_VM_HOST" "sudo tee /etc/greendata/secrets > /dev/null"
     - |
       REBUILD_RAG=false
