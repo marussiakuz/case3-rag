@@ -1,5 +1,5 @@
 """
-Мета-аудитор на базе Claude Opus 4.7.
+Мета-аудитор на базе Qwen3 235B (Cerebras API).
 
 Внешний контур анализа — не часть продуктовой архитектуры.
 Задача: анализировать SystemResult, выявлять паттерны ошибок генератора и аудитора,
@@ -8,7 +8,7 @@
 Два полезных эффекта:
   (a) Закрывает вопрос «как генератор учится между итерациями» — через RAG-поиск
       по похожим задачам с уже разобранными ошибками.
-  (b) Дистилляция знания сильной модели (Opus) в подсказки для слабых (Qwen3 32B).
+  (b) Дистилляция знания сильной модели (Qwen3 235B) в подсказки для генератора.
 
 Использование:
     from meta_auditor.opus_reviewer import OpusMetaAuditor
@@ -29,8 +29,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import anthropic
 import numpy as np
+from cerebras.cloud.sdk import Cerebras
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 
@@ -42,18 +42,20 @@ sys.path.insert(0, str(ROOT))
 from baseline1 import SystemResult
 from db.rag_store import insert_embedding
 
-MODEL = "claude-opus-4-7"
+MODEL = "qwen-3-235b-a22b-instruct-2507"
+TEMPERATURE = 0.0
 MAX_TOKENS = 1024
 INDEX_NAME = "solutions"
 EMBED_MODEL = "intfloat/multilingual-e5-small"
 PASSAGE_PREFIX = "passage: "
 
 SYSTEM_PROMPT = """\
+/no_think
 Ты старший эксперт по безопасности SQL и архитектуре LLM-систем.
 
 Тебе передают лог работы автоматической системы генерации SQL:
-- Генератор (Qwen3 235B) создаёт SQL по текстовому описанию.
-- Аудитор (Qwen3 235B) проверяет SQL на уязвимости.
+- Генератор (Qwen3) создаёт SQL по текстовому описанию.
+- Аудитор (Qwen3) проверяет SQL на уязвимости.
 - Они итерируют до 5 раз, пока аудитор не одобрит запрос.
 
 Твоя задача — внешний мета-анализ:
@@ -82,23 +84,14 @@ SYSTEM_PROMPT = """\
 
 class OpusMetaAuditor:
     """
-    Мета-аудитор на базе Claude Opus 4.7.
+    Мета-аудитор на базе Qwen3 235B (Cerebras API).
 
     Анализирует SystemResult и сохраняет разборы в RAG-индекс 'solutions'.
     Не является частью продуктовой архитектуры — запускается как внешний контур.
-
-    Args:
-        model: модель Anthropic (по умолчанию claude-opus-4-7)
     """
 
     def __init__(self, model: str = MODEL) -> None:
-        api_key = os.getenv("ANTHROPIC_API_KEY", "")
-        if not api_key or api_key.startswith("sk-ant-ЗАМЕНИ"):
-            raise EnvironmentError(
-                "ANTHROPIC_API_KEY не задан. Добавь в .env:\n"
-                "  ANTHROPIC_API_KEY=sk-ant-..."
-            )
-        self._client = anthropic.Anthropic(api_key=api_key)
+        self._client = Cerebras(api_key=os.getenv("CEREBRAS_API_KEY"))
         self.model = model
         self._embed_model: SentenceTransformer | None = None
 
@@ -109,15 +102,13 @@ class OpusMetaAuditor:
 
     def _embed(self, text: str) -> np.ndarray:
         model = self._get_embed_model()
-        vec = model.encode(
+        return model.encode(
             [PASSAGE_PREFIX + text],
             normalize_embeddings=True,
         ).astype("float32")[0]
-        return vec
 
     def _build_user_prompt(self, task_description: str, result: SystemResult) -> str:
         parts: list[str] = [f"Задача пользователя: {task_description}\n"]
-
         parts.append(f"Итого итераций: {result.iterations_used}")
         parts.append(f"Финальный статус: {'ОДОБРЕН' if result.approved else 'ОТКЛОНЁН'}\n")
 
@@ -125,57 +116,43 @@ class OpusMetaAuditor:
             status = "✅ одобрен" if log.audit_result.approved else "❌ отклонён"
             parts.append(f"── Итерация {log.iteration} [{status}] ──")
             parts.append(f"SQL:\n{log.sql_query}")
-            parts.append(f"Риск-скор аудитора: {log.audit_result.overall_risk_score:.1f}/10")
-            parts.append(f"Вердикт аудитора: {log.audit_result.summary}")
+            parts.append(f"Риск-скор: {log.audit_result.overall_risk_score:.1f}/10")
+            parts.append(f"Вердикт: {log.audit_result.summary}")
             if log.audit_result.vulnerabilities:
-                parts.append("Найденные уязвимости:")
+                parts.append("Уязвимости:")
                 for v in log.audit_result.vulnerabilities:
                     parts.append(
-                        f"  [{v.vuln_class}] риск {v.risk_score}/10\n"
-                        f"  {v.description}\n"
-                        f"  Рекомендация: {v.recommendation}"
+                        f"  [{v.vuln_class}] риск {v.risk_score}/10 — "
+                        f"{v.description} / {v.recommendation}"
                     )
-            if log.revision_notes:
-                parts.append(f"Что изменилось: {log.revision_notes}")
             parts.append("")
 
         parts.append(f"Финальный SQL:\n{result.final_sql}")
-        parts.append("\nПроведи мета-анализ и верни JSON:")
+        parts.append("\nВерни JSON с мета-анализом:")
         return "\n".join(parts)
 
     def review(self, task_description: str, result: SystemResult) -> dict[str, Any]:
         """
-        Анализирует SystemResult с помощью Opus.
-
-        Args:
-            task_description: задача на естественном языке
-            result: результат работы пайплайна (все итерации + финальный SQL)
+        Анализирует SystemResult через Qwen3 235B.
 
         Returns:
-            Словарь с полями: task_type, generator_errors, auditor_verdict,
+            Словарь: task_type, generator_errors, auditor_verdict,
             auditor_notes, correct_sql_approach, lesson_for_generator, searchable_text
         """
         user_prompt = self._build_user_prompt(task_description, result)
 
-        response = self._client.messages.create(
+        response = self._client.chat.completions.create(
             model=self.model,
+            temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
-            system=[
-                {
-                    "type": "text",
-                    "text": SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                }
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
             ],
-            messages=[{"role": "user", "content": user_prompt}],
         )
 
-        raw = response.content[0].text.strip()
-        # Убираем возможные markdown-обёртки
-        if raw.startswith("```"):
-            lines = raw.split("\n")
-            raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-
+        raw = response.choices[0].message.content or "{}"
         try:
             analysis = json.loads(raw)
         except json.JSONDecodeError:
@@ -183,7 +160,7 @@ class OpusMetaAuditor:
                 "task_type": "unknown",
                 "generator_errors": [],
                 "auditor_verdict": "unknown",
-                "auditor_notes": "Ошибка парсинга ответа Opus",
+                "auditor_notes": "Ошибка парсинга ответа мета-аудитора",
                 "correct_sql_approach": "",
                 "lesson_for_generator": "",
                 "searchable_text": f"Задача: {task_description}. Ошибка мета-анализа.",
@@ -195,20 +172,13 @@ class OpusMetaAuditor:
         return analysis
 
     def save_to_rag(self, task_description: str, analysis: dict[str, Any]) -> None:
-        """
-        Сохраняет анализ в RAG-индекс 'solutions'.
-
-        Текст для поиска = searchable_text из анализа Opus.
-        Будущий генератор найдёт этот урок при поиске по похожей задаче.
-        """
+        """Сохраняет анализ в RAG-индекс 'solutions'."""
         searchable_text = analysis.get("searchable_text", "")
         if not searchable_text:
             return
 
-        embedding = self._embed(searchable_text)
-
         metadata = {
-            "source": "opus_meta_audit",
+            "source": "meta_audit",
             "task_description": task_description,
             "task_type": analysis.get("task_type", "unknown"),
             "generator_errors": analysis.get("generator_errors", []),
@@ -220,22 +190,13 @@ class OpusMetaAuditor:
             "text": searchable_text,
         }
 
-        insert_embedding(INDEX_NAME, searchable_text, metadata, embedding)
-        print(f"  [MetaAudit] Урок сохранён в RAG '{INDEX_NAME}': {task_description[:60]}")
+        insert_embedding(INDEX_NAME, searchable_text, self._embed(searchable_text), metadata)
+        print(f"  [MetaAudit] Урок сохранён → '{task_description[:60]}'")
 
     def review_and_save(
         self, task_description: str, result: SystemResult
     ) -> dict[str, Any]:
-        """
-        Анализирует SystemResult и сразу сохраняет урок в RAG.
-
-        Args:
-            task_description: задача на естественном языке
-            result: результат пайплайна
-
-        Returns:
-            Словарь с анализом Opus (те же поля что у review())
-        """
+        """Анализирует SystemResult и сразу сохраняет урок в RAG."""
         analysis = self.review(task_description, result)
         self.save_to_rag(task_description, analysis)
         return analysis
@@ -259,21 +220,11 @@ if __name__ == "__main__":
                 audit_result=AuditResult(
                     approved=False,
                     vulnerabilities=[
-                        Vulnerability(
-                            vuln_class="SELECT_STAR",
-                            risk_score=5.0,
-                            description="SELECT * возвращает все колонки включая чувствительные",
-                            recommendation="Явно указать нужные колонки",
-                        ),
-                        Vulnerability(
-                            vuln_class="NO_PAGINATION",
-                            risk_score=4.0,
-                            description="Отсутствует LIMIT",
-                            recommendation="Добавить LIMIT 100",
-                        ),
+                        Vulnerability("SELECT_STAR", 5.0, "SELECT * возвращает все колонки", "Указать колонки явно"),
+                        Vulnerability("NO_PAGINATION", 4.0, "Отсутствует LIMIT", "Добавить LIMIT"),
                     ],
                     overall_risk_score=5.0,
-                    summary="Запрос отклонён: SELECT * и отсутствие LIMIT",
+                    summary="Отклонён: SELECT * и нет LIMIT",
                 ),
                 revision_notes="Первая генерация",
             ),
@@ -281,28 +232,19 @@ if __name__ == "__main__":
                 timestamp=datetime.now(),
                 iteration=2,
                 sql_query="SELECT id, name, sur_name FROM sys_employee WHERE status = 1 ORDER BY sur_name LIMIT 50",
-                audit_result=AuditResult(
-                    approved=True,
-                    vulnerabilities=[],
-                    overall_risk_score=0.0,
-                    summary="Запрос безопасен",
-                ),
-                revision_notes="Исправление: убран SELECT *, добавлен LIMIT",
+                audit_result=AuditResult(approved=True, vulnerabilities=[], overall_risk_score=0.0, summary="OK"),
+                revision_notes="Исправлено",
             ),
         ],
-        audit_log="Итерация 1: SELECT_STAR, NO_PAGINATION. Итерация 2: одобрен.",
-        metadata={"task_id": "test_001", "execution_time_seconds": 4.2},
+        audit_log="",
+        metadata={},
     )
 
     reviewer = OpusMetaAuditor()
     analysis = reviewer.review_and_save(
-        task_description="показать топ-50 активных сотрудников, отсортированных по фамилии",
+        task_description="показать топ-50 активных сотрудников по фамилии",
         result=mock_result,
     )
-
-    print("\n── Анализ Opus ──────────────────────────────────────────")
-    print(f"Тип задачи:     {analysis['task_type']}")
-    print(f"Ошибки генератора: {analysis['generator_errors']}")
-    print(f"Вердикт по аудитору: {analysis['auditor_verdict']}")
-    print(f"\nПравильный подход:\n  {analysis['correct_sql_approach']}")
-    print(f"\nУрок для генератора:\n  {analysis['lesson_for_generator']}")
+    print(f"\nТип: {analysis['task_type']}")
+    print(f"Ошибки: {analysis['generator_errors']}")
+    print(f"Урок: {analysis['lesson_for_generator']}")
