@@ -209,7 +209,7 @@ def run_pipeline(
 # ── Быстрая проверка ──────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    from rag_pipeline.metrics import compute_single, format_report, compute_batch
+    from rag_pipeline.metrics import format_report, compute_batch
 
     tasks = [
         "показать топ-10 активных сотрудников с их компанией, отсортированных по фамилии",

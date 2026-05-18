@@ -20,7 +20,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 from sentence_transformers import SentenceTransformer
 
 ROOT = Path(__file__).parent.parent

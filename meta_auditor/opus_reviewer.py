@@ -206,7 +206,7 @@ class OpusMetaAuditor:
 
 if __name__ == "__main__":
     from datetime import datetime
-    from baseline1 import AuditResult, IterationLog, SystemResult, Vulnerability
+    from baseline1 import AuditResult, IterationLog, Vulnerability
 
     mock_result = SystemResult(
         final_sql="SELECT id, name, sur_name FROM sys_employee WHERE status = 1 ORDER BY sur_name LIMIT 50",
