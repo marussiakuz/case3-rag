@@ -100,11 +100,12 @@ def _parse_response(raw: str, sql_query: str) -> AuditResult:
         if not isinstance(data, dict):
             raise ValueError(f"Expected JSON object, got {type(data).__name__}")
     except (json.JSONDecodeError, ValueError):
+        # При ошибке парсинга — отклоняем (fail-secure, не fail-open)
         return AuditResult(
-            approved=True,
+            approved=False,
             vulnerabilities=[],
-            overall_risk_score=0.0,
-            summary=f"Ошибка парсинга ответа аудитора: {cleaned[:200]}",
+            overall_risk_score=5.0,
+            summary=f"Ошибка парсинга ответа аудитора — запрос отклонён: {cleaned[:200]}",
         )
 
     vulns = [
@@ -212,6 +213,13 @@ class GroqSecurityAuditor(SecurityAuditor):
             "total_tokens":      getattr(usage, "total_tokens",      0) or 0 if usage else 0,
             "remaining_tokens":  None,
         }
+        if not response.choices:
+            return AuditResult(
+                approved=False,
+                vulnerabilities=[],
+                overall_risk_score=5.0,
+                summary="Пустой ответ от модели — запрос отклонён",
+            )
         raw = response.choices[0].message.content or "{}"
         return _parse_response(raw, sql_query)
 

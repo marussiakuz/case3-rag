@@ -94,14 +94,27 @@ def _validate_sql(sql: str) -> str | None:
 
 
 def _check_indices() -> bool:
-    indices_dir = ROOT / "rag_pipeline" / "indices"
-    required = ["generation.faiss", "generation_meta.json"]
-    missing = [f for f in required if not (indices_dir / f).exists()]
-    if missing:
-        print("❌ FAISS-индексы не найдены. Запусти сначала:")
-        print("   .venv/bin/python rag_pipeline/build_indices.py")
+    try:
+        import psycopg2 as _pg
+        conn = _pg.connect(
+            host=os.getenv("PG_HOST", "localhost"),
+            port=int(os.getenv("PG_PORT", "5432")),
+            dbname="gd_app",
+            user=os.getenv("PG_USER", "postgres"),
+            password=os.getenv("PG_PASSWORD", ""),
+        )
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM rag_embeddings WHERE index_name='generation'")
+            count = cur.fetchone()[0]
+        conn.close()
+        if count == 0:
+            print("❌ RAG-индекс 'generation' пуст. Запусти сначала:")
+            print("   .venv/bin/python rag_pipeline/build_indices.py")
+            return False
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка проверки RAG-индекса: {e}")
         return False
-    return True
 
 
 def _substitute_placeholders(sql: str) -> str:
