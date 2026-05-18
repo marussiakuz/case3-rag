@@ -33,11 +33,10 @@ import statistics
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from baseline1 import AuditResult, IterationLog, SystemResult
+from baseline1 import AuditResult, IterationLog, SystemResult, Vulnerability
 
 try:
     import sqlparse
