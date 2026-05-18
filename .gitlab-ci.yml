@@ -41,6 +41,7 @@ deploy:
     - apk add -q openssh-client rsync bash
     - eval $(ssh-agent -s)
     - chmod 400 "$YC_SSH_KEY"
+    - printf '\n' >> "$YC_SSH_KEY"
     - ssh-add "$YC_SSH_KEY"
     # Добавляем хост в known_hosts без интерактивного подтверждения
     - mkdir -p ~/.ssh
