@@ -28,7 +28,7 @@ from baseline1 import AuditResult, SQLGenerator
 from rag_pipeline.rag_tools import get_generation_context, get_solutions_context
 
 ROOT = Path(__file__).parent.parent
-MODEL = os.getenv("OPENROUTER_MODEL", "qwen/qwen3-235b-a22b")
+MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
 TEMPERATURE = 0.1
 MAX_TOKENS = 512  # SQL не длиннее 512 токенов — ограничивает thinking mode Qwen3
 

@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from baseline1 import AuditResult, SecurityAuditor, Vulnerability
 from rag_pipeline.rag_tools import get_security_context, get_sensitive_fields
 
-MODEL = os.getenv("OPENROUTER_MODEL", "qwen/qwen3-235b-a22b")
+MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
 TEMPERATURE = 0.0   # аудит должен быть детерминированным
 MAX_TOKENS = 512
 
