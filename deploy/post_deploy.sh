@@ -23,7 +23,7 @@ if [ "${REBUILD_RAG:-false}" = "true" ]; then
 fi
 
 echo "[post_deploy] Перезапуск сервиса..."
-systemctl restart greendata
-systemctl status greendata --no-pager -l
+sudo systemctl restart greendata
+sudo systemctl status greendata --no-pager -l
 
 echo "[post_deploy] Готово."
