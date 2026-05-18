@@ -86,7 +86,9 @@ class SecurityAuditor:
         "NO_PAGINATION": "Неограниченный LIMIT / отсутствие пагинации",         
         "SQL_INJ_TIME": "Time-based blind Injection",                           
         "PRIV_ESCALATE": "Privilege Escalation через EXECUTE",                  
-        "PLPGSQL_UNSAFE": "PL/pgSQL: небезопасный EXECUTE",                     
+        "PLPGSQL_UNSAFE": "PL/pgSQL: небезопасный EXECUTE",
+        "SCHEMA_LEAK": "Разведка схемы через information_schema",
+        "EXCESSIVE_PRIVILEGE": "Избыточный доступ к данным вне мандата",
     }                                                                           
     RISK_THRESHOLD = 4.0                                                    
 
