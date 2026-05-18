@@ -34,6 +34,7 @@ MAX_TOKENS = 512
 
 
 SYSTEM_PROMPT = """\
+/no_think
 Ты эксперт по безопасности SQL-запросов для PostgreSQL.
 
 Твоя задача — проверить SQL-запрос на уязвимости и вернуть результат в формате JSON.
@@ -94,8 +95,9 @@ def _parse_response(raw: str, sql_query: str) -> AuditResult:
 
     try:
         data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        # Если модель вернула не-JSON — считаем запрос безопасным с нулевым риском
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected JSON object, got {type(data).__name__}")
+    except (json.JSONDecodeError, ValueError):
         return AuditResult(
             approved=True,
             vulnerabilities=[],
