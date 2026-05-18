@@ -1,12 +1,13 @@
 """
-Строит два FAISS-индекса из knowledge_base:
+Строит три RAG-индекса из knowledge_base и сохраняет их в PostgreSQL (gd_app).
 
-  indices/generation.faiss + indices/generation_meta.json
-      — описания таблиц из schema.json
-      — PostgreSQL паттерны из knowledge_base/generation/pg_patterns.json
+  generation — описания таблиц из schema.json + pg_patterns + pg_docs + task_anchors
+  security   — классы уязвимостей из knowledge_base/security/vuln_classes.json
+  performance — советы по оптимизации из knowledge_base/performance/pg_optimization.json
 
-  indices/security.faiss + indices/security_meta.json
-      — классы уязвимостей из knowledge_base/security/vuln_classes.json
+Вместо FAISS-файлов данные хранятся в таблице rag_embeddings (gd_app):
+  - embedding: FLOAT4[] — нормализованный вектор (384 размерности)
+  - поиск: косинусное сходство через numpy в db/rag_store.py
 
 Модель: intfloat/multilingual-e5-small (поддерживает русский + SQL, ~90 МБ)
 
@@ -17,19 +18,22 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
-import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
 ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT))
+
+from db.rag_store import upsert_index
+
 RAG_DIR = ROOT / "rag_pipeline"
-INDICES_DIR = RAG_DIR / "indices"
 KB_DIR = RAG_DIR / "knowledge_base"
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
-PASSAGE_PREFIX = "passage: "  # обязательный префикс для этой модели
+PASSAGE_PREFIX = "passage: "
 
 
 def _load_model() -> SentenceTransformer:
@@ -45,26 +49,15 @@ def _embed(model: SentenceTransformer, texts: list[str]) -> np.ndarray:
 
 
 def _save_index(vecs: np.ndarray, metadata: list[dict], name: str) -> None:
-    """Сохраняет FAISS IndexFlatIP (inner product = cosine для нормализованных) + JSON-мета."""
-    INDICES_DIR.mkdir(parents=True, exist_ok=True)
-    dim = vecs.shape[1]
-    index = faiss.IndexFlatIP(dim)
-    index.add(vecs)
-
-    faiss_path = INDICES_DIR / f"{name}.faiss"
-    meta_path = INDICES_DIR / f"{name}_meta.json"
-
-    faiss.write_index(index, str(faiss_path))
-    meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    print(f"  ✓ {faiss_path.name}  ({index.ntotal} векторов, dim={dim})")
-    print(f"  ✓ {meta_path.name}")
+    """Сохраняет индекс в PostgreSQL (gd_app.rag_embeddings)."""
+    texts = [m.get("text", "") for m in metadata]
+    upsert_index(name, texts, metadata, vecs)
 
 
 # ── Generation index ──────────────────────────────────────────────────────────
 
 def build_generation_index(model: SentenceTransformer) -> None:
-    print("\n[1/2] Строим generation index ...")
+    print("\n[1/3] Строим generation index ...")
     documents: list[dict] = []
 
     # Источник A: описания таблиц из schema.json
@@ -72,11 +65,26 @@ def build_generation_index(model: SentenceTransformer) -> None:
     if not schema_path.exists():
         raise FileNotFoundError(f"schema.json не найден: {schema_path}\nЗапусти сначала: python rag_pipeline/schema_parser.py")
 
+    # Загружаем примеры задач из датасета заранее — для обогащения schema-чанков
+    from collections import defaultdict
+    table_tasks: dict[str, list[str]] = defaultdict(list)
+    dataset_path = ROOT / "validation" / "dataset.json"
+    if dataset_path.exists():
+        for item in json.loads(dataset_path.read_text(encoding="utf-8")):
+            table_tasks[item["table"]].append(item["task"])
+        print(f"  → Примеры задач из dataset.json: {sum(len(v) for v in table_tasks.values())} задач")
+
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     for table_name, table_data in schema["tables"].items():
         text = table_data.get("text_description", "")
         if not text:
             continue
+        # Обогащаем чанк примерами задач из датасета — улучшает семантический поиск:
+        # FAISS будет находить нужную таблицу даже когда запрос содержит слова
+        # типа «иерархия», «CTE», «НДС», не упомянутые в описании таблицы.
+        if table_tasks.get(table_name):
+            tasks_text = "\n".join(f"- {t}" for t in table_tasks[table_name])
+            text += f"\nПримеры задач для этой таблицы:\n{tasks_text}"
         documents.append({
             "source": "schema",
             "table_name": table_name,
@@ -121,6 +129,20 @@ def build_generation_index(model: SentenceTransformer) -> None:
     else:
         print("  → PG docs не найдены (запусти fetch_pg_docs.py)")
 
+    # Источник D: task_anchor — один вектор на каждую задачу из датасета.
+    # Когда FAISS находит task_anchor, _format_generation_context подтягивает
+    # полную schema-запись для этой таблицы. Это решает проблему «размытия»
+    # эмбеддинга когда все 10 задач таблицы слиты в один вектор.
+    if dataset_path.exists():
+        for item in json.loads(dataset_path.read_text(encoding="utf-8")):
+            documents.append({
+                "source": "task_anchor",
+                "table_name": item["table"],
+                "text": item["task"],
+            })
+        n_anchors = sum(1 for d in documents if d["source"] == "task_anchor")
+        print(f"  → Task anchors из dataset.json: {n_anchors}")
+
     print(f"  → Итого документов: {len(documents)}")
 
     texts = [d["text"] for d in documents]
@@ -131,7 +153,7 @@ def build_generation_index(model: SentenceTransformer) -> None:
 # ── Security index ────────────────────────────────────────────────────────────
 
 def build_security_index(model: SentenceTransformer) -> None:
-    print("\n[2/2] Строим security index ...")
+    print("\n[2/3] Строим security index ...")
     documents: list[dict] = []
 
     vuln_path = KB_DIR / "security" / "vuln_classes.json"
@@ -171,14 +193,65 @@ def build_security_index(model: SentenceTransformer) -> None:
     _save_index(vecs, documents, "security")
 
 
+# ── Performance index ─────────────────────────────────────────────────────────
+
+def build_performance_index(model: SentenceTransformer) -> None:
+    print("\n[3/3] Строим performance index ...")
+    documents: list[dict] = []
+
+    opt_path = KB_DIR / "performance" / "pg_optimization.json"
+    if not opt_path.exists():
+        print(f"  → Файл не найден: {opt_path}")
+        return
+
+    optimizations = json.loads(opt_path.read_text(encoding="utf-8"))
+    for opt in optimizations:
+        # Основной документ — полное описание техники
+        full_text = (
+            f"{opt['name']}. {opt['description']}\n"
+            f"Категория: {opt['category']}\n"
+            f"Когда применять: {opt['applies_when']}\n"
+            f"{opt['text']}"
+        )
+        documents.append({
+            "source": "pg_optimization",
+            "optimization_id": opt["optimization_id"],
+            "category": opt["category"],
+            "name": opt["name"],
+            "applies_when": opt["applies_when"],
+            "text": full_text,
+        })
+
+        # Дополнительный документ — пример (лучше находится по SQL-коду)
+        if opt.get("example_good"):
+            example_text = (
+                f"Пример оптимизации: {opt['name']}\n"
+                f"{opt['example_good']}"
+            )
+            documents.append({
+                "source": "pg_optimization_example",
+                "optimization_id": opt["optimization_id"],
+                "category": opt["category"],
+                "name": opt["name"],
+                "applies_when": opt["applies_when"],
+                "text": example_text,
+            })
+
+    print(f"  → Документов по оптимизации: {len(documents)}")
+
+    texts = [d["text"] for d in documents]
+    vecs = _embed(model, texts)
+    _save_index(vecs, documents, "performance")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     model = _load_model()
     build_generation_index(model)
     build_security_index(model)
-    print("\n✓ Все индексы построены.")
-    print(f"  Папка: {INDICES_DIR}")
+    build_performance_index(model)
+    print("\n✓ Все индексы построены и сохранены в PostgreSQL (gd_app.rag_embeddings).")
 
 
 if __name__ == "__main__":

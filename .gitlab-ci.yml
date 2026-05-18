@@ -1,0 +1,96 @@
+---
+# GreenData SQL Security System — GitLab CI/CD
+#
+# Переменные, которые нужно добавить в GitLab → Settings → CI/CD → Variables:
+#
+#   YC_VM_HOST      — внешний IP Yandex Cloud VM (например 51.250.10.42)
+#   YC_VM_USER      — пользователь SSH (ubuntu — стандартный пользователь YC Ubuntu-образа)
+#   YC_SSH_KEY      — приватный SSH-ключ (type: File, masked)
+#   CEREBRAS_API_KEY — ключ Cerebras (masked)
+#   GROQ_API_KEY     — ключ Groq (masked)
+#   ANTHROPIC_API_KEY — ключ Anthropic Opus (masked)
+#   PG_PASSWORD      — пароль PostgreSQL (masked)
+#
+# Триггер: любой push в ветку master.
+
+stages:
+  - validate
+  - deploy
+
+variables:
+  APP_DIR: /opt/greendata
+  PYTHON: $APP_DIR/.venv/bin/python
+
+# ── Syntax check (быстро, без доступа к VM) ──────────────────────────────────
+
+lint:
+  stage: validate
+  image: python:3.11-slim
+  before_script:
+    - pip install -q pyflakes
+  script:
+    - python -m pyflakes baseline1.py generator/generator.py auditor/auditor.py
+      orchestrator/orchestrator.py meta_auditor/opus_reviewer.py
+      rag_pipeline/rag_tools.py rag_pipeline/metrics.py
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+
+# ── Деплой на Yandex Cloud VM ─────────────────────────────────────────────────
+
+deploy:
+  stage: deploy
+  image: alpine:3.19
+  before_script:
+    - apk add -q openssh-client rsync bash
+    - eval $(ssh-agent -s)
+    - chmod 400 "$YC_SSH_KEY"
+    - ssh-add "$YC_SSH_KEY"
+    # Добавляем хост в known_hosts без интерактивного подтверждения
+    - mkdir -p ~/.ssh
+    - ssh-keyscan -H "$YC_VM_HOST" >> ~/.ssh/known_hosts
+  script:
+    # 1. Синхронизируем код (исключаем .venv, __pycache__, FAISS-файлы, .env)
+    - |
+      rsync -az --delete \
+        --exclude='.venv/' \
+        --exclude='__pycache__/' \
+        --exclude='*.pyc' \
+        --exclude='.env' \
+        --exclude='.git/' \
+        --exclude='.DS_Store' \
+        --exclude='rag_pipeline/indices/' \
+        . "$YC_VM_USER@$YC_VM_HOST:$APP_DIR/"
+
+    # 2. Кладём секреты в /etc/greendata/secrets на VM
+    - |
+      ssh "$YC_VM_USER@$YC_VM_HOST" "sudo tee /etc/greendata/secrets > /dev/null" <<SECRETS
+      CEREBRAS_API_KEY=${CEREBRAS_API_KEY}
+      GROQ_API_KEY=${GROQ_API_KEY}
+      ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      PG_PASSWORD=${PG_PASSWORD}
+      PG_HOST=localhost
+      PG_PORT=5432
+      PG_USER=postgres
+      SECRETS
+
+    # 3. Определяем нужна ли пересборка RAG (изменился knowledge_base?)
+    - |
+      REBUILD_RAG=false
+      if git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q 'rag_pipeline/knowledge_base'; then
+        REBUILD_RAG=true
+        echo "knowledge_base изменился — будет пересборка RAG-индексов"
+      fi
+
+    # 4. Запускаем post_deploy.sh на VM
+    - |
+      ssh "$YC_VM_USER@$YC_VM_HOST" \
+        "REBUILD_RAG=${REBUILD_RAG} bash $APP_DIR/deploy/post_deploy.sh"
+
+    - echo "✅ Деплой завершён. Приложение: http://$YC_VM_HOST"
+  environment:
+    name: production
+    url: http://$YC_VM_HOST
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+  dependencies:
+    - lint

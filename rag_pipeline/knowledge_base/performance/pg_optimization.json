@@ -1,0 +1,227 @@
+[
+  {
+    "optimization_id": "explain_analyze",
+    "category": "execution_plan",
+    "name": "EXPLAIN ANALYZE для диагностики медленных запросов",
+    "description": "Анализ плана выполнения запроса с реальными метриками времени и строк",
+    "applies_when": "Запрос выполняется медленно или возвращает неожиданное количество строк",
+    "text": "EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) показывает план выполнения с реальными метриками: actual time, rows, loops, shared hit/read buffers. Seq Scan вместо Index Scan говорит об отсутствии индекса или неактуальной статистике. Высокий cost у Sort или Hash Join означает нехватку work_mem. Rows=1000 при actual rows=1 — неактуальная статистика, нужен ANALYZE. Для GreenData: проверяй планы на таблицах scp_application, credit_contract, afhd_ac_trans_link — они растут быстрее остальных.",
+    "example_good": "EXPLAIN (ANALYZE, BUFFERS)\nSELECT a.id, a.create_date, s.name AS state\nFROM scp_application a\nJOIN sys_state s ON s.id = a.afp_state_id\nWHERE a.create_date >= CURRENT_DATE - INTERVAL '30 days'\nORDER BY a.create_date DESC\nLIMIT 50;"
+  },
+  {
+    "optimization_id": "btree_index_fk",
+    "category": "indexing",
+    "name": "B-tree индекс на внешних ключах",
+    "description": "Создание индексов на FK-колонках для ускорения JOIN-ов",
+    "applies_when": "JOIN по FK-колонке без индекса вызывает Seq Scan на большой таблице",
+    "text": "PostgreSQL не создаёт индексы на внешних ключах автоматически. Без индекса JOIN и WHERE по FK-полю вызывают Seq Scan. Для таблиц GreenData критично индексировать: scp_application(afp_state_id), scp_application(emp_id), scp_application(scp_business_segment), credit_contract(link_customer_id), credit_contract(sys_employee_id), afhd_ac_trans_link(account_num_id). Индекс особенно важен для колонок с высокой кардинальностью (много уникальных значений).",
+    "example_good": "-- Индексы на часто используемых FK GreenData\nCREATE INDEX CONCURRENTLY idx_scp_app_state ON scp_application(afp_state_id);\nCREATE INDEX CONCURRENTLY idx_scp_app_emp ON scp_application(emp_id);\nCREATE INDEX CONCURRENTLY idx_credit_customer ON credit_contract(link_customer_id);\nCREATE INDEX CONCURRENTLY idx_trans_account ON afhd_ac_trans_link(account_num_id);\nCREATE INDEX CONCURRENTLY idx_trans_date ON afhd_ac_trans_link(account_date);"
+  },
+  {
+    "optimization_id": "partial_index",
+    "category": "indexing",
+    "name": "Частичный индекс (partial index) для активных записей",
+    "description": "Индекс только по подмножеству строк — меньше размер, быстрее поиск по активным записям",
+    "applies_when": "Запросы часто фильтруют по статусу (активные заявки, действующие договоры)",
+    "text": "Частичный индекс (WHERE condition) строится только для строк, удовлетворяющих условию. Если большинство запросов работают с активными или открытыми записями (status = 1, is_active = true), частичный индекс меньше обычного и используется чаще. Для GreenData: активные заявки scp_application (status не закрыт), действующие кредитные договоры credit_contract, незавершённые проверки безопасности.",
+    "example_good": "-- Частичный индекс: только активные заявки\nCREATE INDEX idx_scp_app_active_date\n  ON scp_application(create_date DESC)\n  WHERE status NOT IN (3, 4, 5);  -- исключаем закрытые/отклонённые\n\n-- Частичный индекс: действующие кредитные договоры\nCREATE INDEX idx_credit_active\n  ON credit_contract(credit_end_date)\n  WHERE credit_end_date > CURRENT_DATE;"
+  },
+  {
+    "optimization_id": "composite_index_order",
+    "category": "indexing",
+    "name": "Порядок колонок в составном индексе",
+    "description": "Самая селективная или фильтрующая колонка должна идти первой",
+    "applies_when": "Запрос фильтрует по нескольким колонкам одновременно",
+    "text": "В составном индексе (a, b, c) PostgreSQL может использовать префиксы: (a), (a, b), (a, b, c) — но не (b) или (c) отдельно. Правило: первой ставь колонку из WHERE с равенством (=), затем колонки из диапазонных условий (BETWEEN, >=, <=), в конце — колонки из ORDER BY. Для GreenData: частый паттерн — фильтр по org_id + дата, индекс (org_id, create_date) лучше чем (create_date, org_id).",
+    "example_good": "-- Оптимальный порядок для запроса:\n-- WHERE org_id = $1 AND create_date BETWEEN $2 AND $3 ORDER BY create_date DESC\nCREATE INDEX idx_scp_app_org_date\n  ON scp_application(org_id, create_date DESC);\n\n-- Для запроса: WHERE afp_state_id = $1 AND emp_id = $2 ORDER BY create_date\nCREATE INDEX idx_scp_app_state_emp_date\n  ON scp_application(afp_state_id, emp_id, create_date);"
+  },
+  {
+    "optimization_id": "covering_index",
+    "category": "indexing",
+    "name": "Покрывающий индекс (INCLUDE) для избежания heap fetch",
+    "description": "Индекс включает дополнительные колонки чтобы запрос не обращался к основной таблице",
+    "applies_when": "Index Scan → Heap Fetch замедляет запрос при высокой нагрузке чтения",
+    "text": "INCLUDE позволяет добавить колонки в индекс без участия в поиске — только в leaf-узлах. Если SELECT возвращает только колонки из индекса, PostgreSQL делает Index Only Scan без чтения heap (основной таблицы). Это особенно эффективно для отчётных запросов SELECT id, name, status без доступа ко всей строке. Для GreenData: часто нужен список id + статус + дата без полного JOIN.",
+    "example_good": "-- Покрывающий индекс: запрос SELECT id, create_date, status WHERE afp_state_id = $1\nCREATE INDEX idx_scp_app_cover\n  ON scp_application(afp_state_id)\n  INCLUDE (id, create_date, status);\n\n-- Аналогично для credit_contract\nCREATE INDEX idx_credit_cover\n  ON credit_contract(link_customer_id)\n  INCLUDE (id, credit_amount, credit_end_date);"
+  },
+  {
+    "optimization_id": "gin_fulltext",
+    "category": "indexing",
+    "name": "GIN-индекс для полнотекстового поиска",
+    "description": "Ускорение поиска по тексту с оператором @@ и to_tsvector",
+    "applies_when": "Поиск по текстовым полям через LIKE '%...%' или полнотекстовые запросы",
+    "text": "GIN (Generalized Inverted Index) оптимален для полнотекстового поиска, массивов и JSONB. LIKE '%text%' не использует B-tree индексы — нужен GIN с pg_trgm для поиска по подстрокам или tsvector для полнотекстового поиска. Для GreenData: поиск по именам сотрудников (sys_employee.name), комментариям к заявкам. Расширение pg_trgm позволяет ускорить ILIKE '%...%'.",
+    "example_good": "-- Включаем расширение для триграмного поиска\nCREATE EXTENSION IF NOT EXISTS pg_trgm;\n\n-- GIN-индекс на имя сотрудника (поддерживает ILIKE '%...%')\nCREATE INDEX idx_employee_name_gin\n  ON sys_employee USING GIN (name gin_trgm_ops);\n\n-- Запрос с использованием индекса\nSELECT id, name, sur_name, email\nFROM sys_employee\nWHERE name ILIKE '%иванов%'\n  AND status = 1\nLIMIT 20;"
+  },
+  {
+    "optimization_id": "brin_timeseries",
+    "category": "indexing",
+    "name": "BRIN-индекс для временных рядов и больших append-only таблиц",
+    "description": "Компактный индекс для таблиц с физически упорядоченными данными (логи, транзакции)",
+    "applies_when": "Таблица очень большая, данные вставляются по порядку (логи, финансовые транзакции)",
+    "text": "BRIN (Block Range Index) хранит min/max значений для диапазонов страниц. Для таблиц где данные физически упорядочены по времени (append-only логи, транзакции) BRIN в 100x меньше B-tree и почти так же эффективен для range-запросов по дате. Для GreenData: afhd_ac_trans_link.account_date — транзакции вставляются по порядку, BRIN идеален.",
+    "example_good": "-- BRIN-индекс для таблицы финансовых транзакций\nCREATE INDEX idx_trans_date_brin\n  ON afhd_ac_trans_link USING BRIN (account_date)\n  WITH (pages_per_range = 128);\n\n-- Запрос эффективно использует BRIN\nSELECT account_num_id, SUM(after_amount) AS total\nFROM afhd_ac_trans_link\nWHERE account_date BETWEEN '2024-01-01' AND '2024-03-31'\nGROUP BY account_num_id\nORDER BY total DESC\nLIMIT 100;"
+  },
+  {
+    "optimization_id": "keyset_pagination",
+    "category": "query_rewrite",
+    "name": "Keyset-пагинация вместо OFFSET для больших таблиц",
+    "description": "OFFSET N сканирует все N строк — на больших таблицах крайне медленно",
+    "applies_when": "Пагинация по большой таблице (страницы > 10, таблица > 100k строк)",
+    "text": "OFFSET N заставляет PostgreSQL прочитать и пропустить N строк — при OFFSET 10000 это 10000 ненужных чтений. Keyset-пагинация (WHERE id > last_seen_id) использует индекс и работает за O(1) независимо от глубины страницы. Единственное ограничение: нельзя прыгнуть на произвольную страницу. Для GreenData: используй keyset при листании заявок, договоров, транзакций по дате или id.",
+    "example_good": "-- ПЛОХО: медленно на больших offset\n-- SELECT * FROM scp_application ORDER BY id LIMIT 20 OFFSET 10000;\n\n-- ХОРОШО: keyset-пагинация\nSELECT a.id, a.create_date, a.status, s.name AS state\nFROM scp_application a\nJOIN sys_state s ON s.id = a.afp_state_id\nWHERE a.id > $1  -- $1 = последний id с предыдущей страницы\nORDER BY a.id\nLIMIT 20;"
+  },
+  {
+    "optimization_id": "exists_vs_in",
+    "category": "query_rewrite",
+    "name": "EXISTS вместо IN для подзапросов с большим набором значений",
+    "description": "EXISTS останавливается при первом совпадении, IN строит весь набор",
+    "applies_when": "Подзапрос IN возвращает много строк или используется для проверки существования",
+    "text": "EXISTS (SELECT 1 FROM ...) останавливается при первом найденном совпадении. IN (SELECT id FROM ...) строит полный набор значений перед сравнением. Для больших подзапросов EXISTS быстрее, особенно с NOT IN (который игнорирует NULL некорректно) — замени на NOT EXISTS. Для GreenData: проверка наличия заявок у клиента, договоров у сотрудника.",
+    "example_good": "-- ПЛОХО: IN строит весь набор\n-- SELECT * FROM sys_company WHERE id IN (SELECT link_customer_id FROM credit_contract);\n\n-- ХОРОШО: EXISTS\nSELECT c.id, c.name, c.inn\nFROM sys_company c\nWHERE EXISTS (\n    SELECT 1 FROM credit_contract cc\n    WHERE cc.link_customer_id = c.id\n      AND cc.credit_end_date > CURRENT_DATE\n)\nAND c.status = 1;"
+  },
+  {
+    "optimization_id": "avoid_func_on_indexed_col",
+    "category": "query_rewrite",
+    "name": "Избегай функций на индексированных колонках в WHERE",
+    "description": "Функция над индексированной колонкой делает индекс неиспользуемым",
+    "applies_when": "WHERE содержит DATE(timestamp_col) = или LOWER(varchar_col) = и индекс не используется",
+    "text": "WHERE DATE(create_date) = '2024-01-01' не использует индекс на create_date — PostgreSQL вычисляет DATE() для каждой строки. Нужно переписать в диапазон: WHERE create_date >= '2024-01-01' AND create_date < '2024-01-02'. Аналогично: LOWER(name) = 'иванов' не использует индекс — создай функциональный индекс или используй ILIKE с pg_trgm. Для GreenData: частый паттерн с account_date, create_date.",
+    "example_good": "-- ПЛОХО: функция на индексированной колонке\n-- WHERE DATE(create_date) = '2024-03-15'\n-- WHERE EXTRACT(YEAR FROM create_date) = 2024\n\n-- ХОРОШО: диапазонный фильтр использует индекс\nSELECT id, create_date, status\nFROM scp_application\nWHERE create_date >= '2024-03-15'\n  AND create_date < '2024-03-16'\nORDER BY create_date DESC\nLIMIT 50;"
+  },
+  {
+    "optimization_id": "cte_materialization",
+    "category": "query_rewrite",
+    "name": "Материализация CTE: когда PostgreSQL кеширует результат",
+    "description": "В PostgreSQL 12+ CTE больше не материализуются автоматически — это изменяет поведение",
+    "applies_when": "CTE используется несколько раз или нужна точно однократная вычислимость",
+    "text": "До PostgreSQL 12 каждый CTE (WITH ...) вычислялся ровно один раз и кешировался (fence). С PostgreSQL 12+ планировщик может инлайнить CTE как подзапрос, что иногда быстрее (планировщик видит весь запрос), иногда медленнее (CTE вычисляется многократно). Используй MATERIALIZED для принудительного кеша, NOT MATERIALIZED для инлайна. Для GreenData: тяжёлые агрегации в CTE лучше делать MATERIALIZED.",
+    "example_good": "-- MATERIALIZED: тяжёлый агрегат считается один раз\nWITH monthly_stats AS MATERIALIZED (\n    SELECT\n        DATE_TRUNC('month', account_date) AS month,\n        account_num_id,\n        SUM(after_amount) AS total_amount,\n        COUNT(*) AS tx_count\n    FROM afhd_ac_trans_link\n    WHERE account_date >= NOW() - INTERVAL '12 months'\n    GROUP BY 1, 2\n)\nSELECT m.month, a.id AS account_id, m.total_amount\nFROM monthly_stats m\nJOIN acc_number a ON a.id = m.account_num_id\nORDER BY m.month DESC, m.total_amount DESC\nLIMIT 100;"
+  },
+  {
+    "optimization_id": "window_vs_self_join",
+    "category": "query_rewrite",
+    "name": "Оконные функции вместо self-JOIN для ранжирования",
+    "description": "ROW_NUMBER() / RANK() в разы быстрее самосоединения для топ-N по группам",
+    "applies_when": "Нужен топ-N записей внутри каждой группы (первая заявка клиента, последний договор)",
+    "text": "Self-JOIN для получения топ-N по группам (WHERE id IN (SELECT MAX(id) FROM ... GROUP BY)) работает в O(n²). Оконная функция ROW_NUMBER() OVER (PARTITION BY ...) сортирует внутри группы за один проход. Для GreenData: первая заявка от каждого сотрудника, последний кредитный договор клиента, последняя транзакция по счёту.",
+    "example_good": "-- Последний кредитный договор каждого клиента\nSELECT\n    customer_id,\n    contract_id,\n    credit_amount,\n    credit_start_date\nFROM (\n    SELECT\n        link_customer_id AS customer_id,\n        id AS contract_id,\n        credit_amount,\n        credit_start_date,\n        ROW_NUMBER() OVER (\n            PARTITION BY link_customer_id\n            ORDER BY credit_start_date DESC\n        ) AS rn\n    FROM credit_contract\n    WHERE credit_start_date IS NOT NULL\n) ranked\nWHERE rn = 1\nORDER BY credit_amount DESC\nLIMIT 50;"
+  },
+  {
+    "optimization_id": "statistics_update",
+    "category": "statistics",
+    "name": "Актуализация статистики через ANALYZE",
+    "description": "Устаревшая статистика приводит к плохим планам запросов",
+    "applies_when": "После массовой вставки/обновления, запрос выбирает неоптимальный план",
+    "text": "PostgreSQL выбирает план запроса на основе статистики в pg_statistic. Если данные изменились, но ANALYZE не запускался — планировщик ошибается в оценке количества строк и выбирает Seq Scan вместо Index Scan. VACUUM ANALYZE нужно запускать после массовой загрузки данных. Autovacuum справляется при постепенных изменениях, но при bulk insert нужен ручной ANALYZE. Для GreenData: после загрузки синтетических данных запусти ANALYZE на всех таблицах.",
+    "example_good": "-- После массовой загрузки данных\nANALYZE sys_employee;\nANALYZE sys_company;\nANALYZE scp_application;\nANALYZE credit_contract;\nANALYZE afhd_ac_trans_link;\n\n-- Проверить актуальность статистики\nSELECT schemaname, tablename, last_analyze, last_autoanalyze, n_live_tup\nFROM pg_stat_user_tables\nORDER BY n_live_tup DESC;"
+  },
+  {
+    "optimization_id": "work_mem_sort",
+    "category": "execution_plan",
+    "name": "work_mem для сортировки и хэш-соединений в памяти",
+    "description": "Увеличение work_mem позволяет делать Sort и Hash Join без записи на диск",
+    "applies_when": "В плане запроса есть Sort или Hash Join с external merge (данные уходят на диск)",
+    "text": "work_mem определяет объём памяти для одной операции сортировки или хэш-таблицы. При нехватке PostgreSQL использует temporary files на диске (external merge/sort) — в 10-100x медленнее. EXPLAIN ANALYZE покажет Sort Method: external merge. Увеличь для конкретного запроса через SET LOCAL work_mem = '256MB' в транзакции — глобально увеличивать опасно (умножается на количество соединений).",
+    "example_good": "-- Локально увеличить work_mem для тяжёлого аналитического запроса\nBEGIN;\nSET LOCAL work_mem = '256MB';\n\nSELECT\n    c.name AS company,\n    DATE_TRUNC('quarter', cc.credit_start_date) AS quarter,\n    SUM(cc.credit_amount) AS total_credit,\n    COUNT(*) AS contract_count\nFROM credit_contract cc\nJOIN sys_company c ON c.id = cc.link_customer_id\nWHERE cc.credit_start_date >= '2023-01-01'\nGROUP BY 1, 2\nORDER BY 2 DESC, 3 DESC;\n\nCOMMIT;"
+  },
+  {
+    "optimization_id": "batch_insert",
+    "category": "execution_plan",
+    "name": "Пакетная вставка вместо построчной",
+    "description": "INSERT ... VALUES (row1), (row2), ... или COPY значительно быстрее отдельных INSERT",
+    "applies_when": "Нужно вставить много строк (синтетика, миграция, загрузка данных)",
+    "text": "Каждый отдельный INSERT — это отдельная транзакция с flush на диск. Пакетный INSERT VALUES с несколькими строками или COPY FROM в 10-50x быстрее. Для генерации синтетических данных через Python: используй executemany или copy_from psycopg2. Обёртка в транзакцию дополнительно ускоряет запись. Для GreenData: при наполнении синтетикой (1000+ строк на таблицу) используй COPY или пакетный INSERT по 500-1000 строк.",
+    "example_good": "-- Пакетная вставка 1000 строк за один запрос\nINSERT INTO sys_employee\n    (name, sur_name, org_id, email, phone, status)\nVALUES\n    ('Иван', 'Иванов', 1, 'ivanov@greendata.ru', '+79001234567', 1),\n    ('Пётр', 'Петров', 1, 'petrov@greendata.ru', '+79001234568', 1)\n    -- ... до 1000 строк\n;\n\n-- Ещё быстрее — COPY для загрузки CSV\n-- COPY sys_employee(name, sur_name, org_id, email, phone, status)\n-- FROM '/path/to/employees.csv' CSV HEADER;"
+  },
+  {
+    "optimization_id": "lateral_join_perf",
+    "category": "query_rewrite",
+    "name": "LATERAL JOIN для коррелированных подзапросов",
+    "description": "LATERAL позволяет подзапросу ссылаться на строки из внешнего запроса — эффективнее коррелированных подзапросов",
+    "applies_when": "Нужен топ-N записей для каждой строки внешнего запроса",
+    "text": "Коррелированный подзапрос в SELECT вычисляется по разу для каждой строки результата — это O(n*m). LATERAL JOIN позволяет написать то же самое, но планировщик может оптимизировать выполнение. Особенно полезен для 'для каждого X найти последние N Y'. Для GreenData: для каждой компании найти последние 3 договора, для каждого сотрудника — последнюю заявку.",
+    "example_good": "-- Для каждой компании — последний кредитный договор\nSELECT\n    c.id AS company_id,\n    c.name AS company_name,\n    latest.credit_amount,\n    latest.credit_start_date\nFROM sys_company c\nCROSS JOIN LATERAL (\n    SELECT credit_amount, credit_start_date\n    FROM credit_contract cc\n    WHERE cc.link_customer_id = c.id\n    ORDER BY credit_start_date DESC\n    LIMIT 1\n) latest\nWHERE c.status = 1\nORDER BY latest.credit_amount DESC NULLS LAST\nLIMIT 50;"
+  },
+  {
+    "optimization_id": "index_bloat_reindex",
+    "category": "maintenance",
+    "name": "Перестройка раздутых индексов (REINDEX CONCURRENTLY)",
+    "description": "После массовых обновлений и удалений индексы становятся раздутыми и медленными",
+    "applies_when": "Индекс стал значительно больше таблицы или запросы постепенно замедляются",
+    "text": "Частые UPDATE и DELETE создают мёртвые версии строк в индексах (bloat). Раздутый индекс занимает больше места и работает медленнее. VACUUM не возвращает место ОС, но помечает страницы для повторного использования. Для полной перестройки — REINDEX CONCURRENTLY (не блокирует таблицу в PG 12+). Диагностика: pgstattuple расширение показывает bloat. Для GreenData: актуально для afhd_ac_trans_link при активной работе.",
+    "example_good": "-- Проверить размер индексов\nSELECT\n    schemaname,\n    tablename,\n    indexname,\n    pg_size_pretty(pg_relation_size(indexrelid)) AS index_size\nFROM pg_stat_user_indexes\nORDER BY pg_relation_size(indexrelid) DESC\nLIMIT 20;\n\n-- Перестройка без блокировки таблицы (PostgreSQL 12+)\nREINDEX INDEX CONCURRENTLY idx_trans_account;\nREINDEX TABLE CONCURRENTLY afhd_ac_trans_link;"
+  },
+  {
+    "optimization_id": "parallel_query",
+    "category": "execution_plan",
+    "name": "Параллельное выполнение тяжёлых аналитических запросов",
+    "description": "PostgreSQL может распараллелить Seq Scan, Aggregate, Hash Join по нескольким воркерам",
+    "applies_when": "Тяжёлый аналитический запрос с агрегацией на большой таблице выполняется последовательно",
+    "text": "PostgreSQL автоматически использует параллельное выполнение для тяжёлых запросов (Parallel Seq Scan, Parallel Aggregate). Управляется через max_parallel_workers_per_gather (по умолчанию 2). Если параллелизм не включается — проверь: достаточно ли большая таблица (min_parallel_table_scan_size), нет ли принудительного LIMIT который отключает параллелизм. SET max_parallel_workers_per_gather = 4 для конкретного запроса. Для GreenData: аналитика по afhd_ac_trans_link и credit_contract.",
+    "example_good": "-- Включить больше воркеров для тяжёлой аналитики\nSET max_parallel_workers_per_gather = 4;\n\nSELECT\n    DATE_TRUNC('month', t.account_date) AS month,\n    COUNT(DISTINCT t.account_num_id) AS unique_accounts,\n    SUM(t.after_amount) AS total_volume,\n    AVG(t.after_amount) AS avg_transaction\nFROM afhd_ac_trans_link t\nWHERE t.account_date >= NOW() - INTERVAL '2 years'\nGROUP BY 1\nORDER BY 1 DESC;"
+  },
+  {
+    "optimization_id": "connection_pool",
+    "category": "infrastructure",
+    "name": "Пулинг соединений через PgBouncer",
+    "description": "Каждое соединение с PostgreSQL стоит ~5-10 МБ RAM и CPU — пулинг критичен при нагрузке",
+    "applies_when": "Приложение создаёт много коротких соединений, наблюдается деградация при росте числа клиентов",
+    "text": "PostgreSQL создаёт отдельный backend-процесс для каждого соединения (~5-10 МБ RAM). При 100+ соединениях начинается деградация. PgBouncer в transaction mode поддерживает тысячи клиентских соединений через небольшой пул серверных. Для разработки и тестирования это некритично. Для продакшн-нагрузки и бенчмарков — важно. Для GreenData хакатона: используй connection pool в SQLAlchemy или psycopg2 pool.",
+    "example_good": "-- Python: пул соединений через psycopg2\nfrom psycopg2 import pool\n\nconnection_pool = pool.ThreadedConnectionPool(\n    minconn=2,\n    maxconn=10,\n    dsn='postgresql://user:pass@localhost:5432/greendata'\n)\n\nconn = connection_pool.getconn()\ntry:\n    with conn.cursor() as cur:\n        cur.execute('SELECT id, name FROM sys_company WHERE status = 1 LIMIT 10')\n        rows = cur.fetchall()\nfinally:\n    connection_pool.putconn(conn)"
+  },
+  {
+    "optimization_id": "jsonb_index",
+    "category": "indexing",
+    "name": "GIN-индекс для JSONB-полей",
+    "description": "Поиск по ключам и значениям внутри JSONB без полного сканирования",
+    "applies_when": "Таблица содержит JSONB-колонки по которым часто фильтруют",
+    "text": "JSONB поддерживает GIN-индекс для операторов @>, ?, ?&, ?|. Без индекса поиск по jsonb-полю — всегда Seq Scan. jsonb_path_ops (по умолчанию) поддерживает только @> (содержит). jsonb_ops поддерживает все операторы, но занимает больше места. Для диагностики производительности JSON-запросов используй EXPLAIN ANALYZE и смотри на Bitmap Index Scan vs Seq Scan.",
+    "example_good": "-- GIN-индекс для JSONB-поля (если есть в схеме)\nCREATE INDEX idx_jsonb_data ON some_table USING GIN (json_data);\n\n-- Эффективный поиск по JSONB\nSELECT id, json_data\nFROM some_table\nWHERE json_data @> '{\"status\": \"active\", \"type\": \"credit\"}'::jsonb\nLIMIT 50;\n\n-- Проверить использование индекса\nEXPLAIN (ANALYZE, BUFFERS)\nSELECT id FROM some_table\nWHERE json_data @> '{\"category\": \"retail\"}'::jsonb;"
+  },
+  {
+    "optimization_id": "seq_scan_detection",
+    "category": "execution_plan",
+    "name": "Обнаружение нежелательных Seq Scan в запросах",
+    "description": "Seq Scan на большой таблице — главный признак отсутствующего или неиспользуемого индекса",
+    "applies_when": "Запрос медленный, EXPLAIN показывает Seq Scan на таблице с >10k строк",
+    "text": "Seq Scan (полное сканирование таблицы) нормален для маленьких таблиц (<1000 строк) или когда возвращается >10-20% строк таблицы. Нежелателен когда: таблица большая, возвращается малый процент строк, есть WHERE по несиндексированному полю. Для обнаружения: SELECT * FROM pg_stat_user_tables WHERE seq_scan > 0 ORDER BY seq_scan DESC — таблицы с частым Seq Scan — кандидаты на индексирование. Для GreenData: следи за scp_application, credit_contract.",
+    "example_good": "-- Найти таблицы с частыми Seq Scan (кандидаты на индексирование)\nSELECT\n    relname AS table_name,\n    seq_scan,\n    idx_scan,\n    CASE WHEN seq_scan + idx_scan > 0\n         THEN ROUND(100.0 * idx_scan / (seq_scan + idx_scan), 1)\n         ELSE 0 END AS idx_scan_pct,\n    n_live_tup AS live_rows\nFROM pg_stat_user_tables\nWHERE seq_scan > 0\nORDER BY seq_scan DESC\nLIMIT 20;"
+  },
+  {
+    "optimization_id": "vacuum_analyze_schedule",
+    "category": "maintenance",
+    "name": "VACUUM и ANALYZE: ручная и автоматическая очистка",
+    "description": "VACUUM возвращает место от мёртвых строк, ANALYZE обновляет статистику планировщика",
+    "applies_when": "После массовых UPDATE/DELETE, перед важным аналитическим запросом",
+    "text": "PostgreSQL MVCC создаёт мёртвые версии строк при UPDATE и DELETE. VACUUM их помечает как доступные для повторного использования. VACUUM FULL возвращает место ОС (но блокирует таблицу). ANALYZE обновляет статистику — планировщик использует её для выбора плана. Autovacuum запускается автоматически, но после массовой загрузки данных полезен ручной запуск. Для GreenData: перед бенчмарком — VACUUM ANALYZE на всех таблицах.",
+    "example_good": "-- Мониторинг мёртвых строк\nSELECT\n    tablename,\n    n_dead_tup,\n    n_live_tup,\n    ROUND(100.0 * n_dead_tup / NULLIF(n_live_tup + n_dead_tup, 0), 1) AS dead_pct,\n    last_vacuum,\n    last_autovacuum\nFROM pg_stat_user_tables\nWHERE n_dead_tup > 100\nORDER BY n_dead_tup DESC;\n\n-- Ручная очистка перед бенчмарком\nVACUUM ANALYZE scp_application;\nVACUUM ANALYZE credit_contract;\nVACUUM ANALYZE afhd_ac_trans_link;"
+  },
+  {
+    "optimization_id": "n_plus_one_detection",
+    "category": "anti_pattern",
+    "name": "Антипаттерн N+1 запросов",
+    "description": "N запросов внутри цикла по N строкам — умножает нагрузку на базу",
+    "applies_when": "Приложение делает много мелких запросов вместо одного JOIN",
+    "text": "N+1: приложение делает 1 запрос для получения N сущностей, затем N запросов для получения связанных данных. Например: выбрать 100 сотрудников → 100 запросов за данными их компаний. Решение: JOIN в одном запросе или IN (...) для пакетной загрузки. В ORM (SQLAlchemy) — eager loading (joinedload, subqueryload). Для GreenData: типичный N+1 — загрузка заявок с данными сотрудника и состояния отдельными запросами.",
+    "example_good": "-- ПЛОХО: N+1 в Python-коде\n-- employees = cursor.execute('SELECT id, org_id FROM sys_employee WHERE status=1')\n-- for emp in employees:\n--     company = cursor.execute('SELECT name FROM sys_company WHERE id = %s', emp.org_id)\n\n-- ХОРОШО: один JOIN\nSELECT\n    e.id,\n    e.name,\n    e.sur_name,\n    e.email,\n    c.name AS company_name,\n    c.inn\nFROM sys_employee e\nJOIN sys_company c ON c.id = e.org_id\nWHERE e.status = 1\nORDER BY c.name, e.sur_name\nLIMIT 100;"
+  },
+  {
+    "optimization_id": "count_star_optimization",
+    "category": "query_rewrite",
+    "name": "Оптимизация COUNT(*) на больших таблицах",
+    "description": "Точный COUNT(*) сканирует всю таблицу — есть быстрые альтернативы для приближённых оценок",
+    "applies_when": "Нужно быстро узнать примерное количество строк для пагинации или статистики",
+    "text": "COUNT(*) без WHERE сканирует всю таблицу (Seq Scan). Для точного COUNT с WHERE нужен индекс (Index Only Scan). Для быстрой оценки общего числа строк используй pg_stat_user_tables.n_live_tup (обновляется ANALYZE). Для COUNT с фильтром — убедись что есть подходящий индекс. Для пагинации: не показывай точное число страниц, используй keyset-пагинацию. Для GreenData: приближённый count для дашбордов.",
+    "example_good": "-- Быстрая оценка без сканирования таблицы\nSELECT relname, n_live_tup AS approx_count\nFROM pg_stat_user_tables\nWHERE relname = 'scp_application';\n\n-- Точный COUNT с использованием Index Only Scan (нужен индекс)\nSELECT COUNT(*)\nFROM scp_application\nWHERE afp_state_id = $1  -- индекс на afp_state_id обязателен\n  AND create_date >= NOW() - INTERVAL '30 days';"
+  },
+  {
+    "optimization_id": "lock_contention",
+    "category": "execution_plan",
+    "name": "Управление блокировками и SELECT FOR UPDATE",
+    "description": "Неправильный порядок блокировок вызывает дедлоки и деградацию производительности",
+    "applies_when": "Одновременные обновления одних записей, длительные транзакции, дедлоки",
+    "text": "SELECT FOR UPDATE блокирует строки для последующего UPDATE в той же транзакции — предотвращает потерянные обновления. Для избежания дедлоков: всегда блокируй строки в одном порядке (например по id ASC). NOWAIT или SKIP LOCKED — альтернативы для очередей задач. Длинные транзакции держат блокировки — минимизируй время между SELECT FOR UPDATE и COMMIT. Для GreenData: обновление статусов заявок, создание договоров.",
+    "example_good": "-- Безопасное обновление статуса заявки с блокировкой\nBEGIN;\n\n-- Блокируем конкретную заявку перед обновлением\nSELECT id, status, afp_state_id\nFROM scp_application\nWHERE id = $1\nFOR UPDATE;\n\n-- Обновляем только если статус позволяет\nUPDATE scp_application\nSET afp_state_id = $2,\n    status = $3\nWHERE id = $1\n  AND status = $4;  -- повторная проверка\n\nCOMMIT;"
+  }
+]

@@ -1,0 +1,28 @@
+[Unit]
+Description=GreenData SQL Security System (Streamlit)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=greendata
+WorkingDirectory=/opt/greendata
+EnvironmentFile=/etc/greendata/env
+
+# API-ключи — хранятся в GitLab CI Secrets, CI кладёт их в env-файл при деплое
+EnvironmentFile=/etc/greendata/secrets
+
+ExecStart=/opt/greendata/.venv/bin/streamlit run app.py \
+    --server.port=8501 \
+    --server.address=127.0.0.1 \
+    --server.headless=true \
+    --server.fileWatcherType=none
+
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=greendata
+
+[Install]
+WantedBy=multi-user.target
