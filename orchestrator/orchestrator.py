@@ -32,11 +32,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from baseline1 import (
     AuditResult,
     IterationLog,
-    SQLGenerator,
     SQLSecuritySystem,
-    SecurityAuditor,
     SystemResult,
-    Vulnerability,
 )
 
 
@@ -70,7 +67,6 @@ class GroqSQLSecuritySystem(SQLSecuritySystem):
         sql_history: list[str] = []
         iterations_log: list[IterationLog] = []
         last_audit: AuditResult | None = None
-        tokens_per_iteration: list[int] = []
 
         for iteration in range(1, self.max_iterations + 1):
             # Генерация
