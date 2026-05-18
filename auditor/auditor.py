@@ -178,16 +178,30 @@ class GroqSecurityAuditor(SecurityAuditor):
             sensitive_fields=self._sensitive_fields,
         )
 
-        response = self._client.chat.completions.create(
-            model=self.model,
-            temperature=self.temperature,
-            max_tokens=MAX_TOKENS,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
+        import time as _time
+        for _attempt in range(4):
+            try:
+                response = self._client.chat.completions.create(
+                    model=self.model,
+                    temperature=self.temperature,
+                    max_tokens=MAX_TOKENS,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                )
+                break
+            except Exception as _e:
+                if _attempt == 3:
+                    raise
+                _wait = 35
+                try:
+                    _wait = int(str(_e).split("retry_after_seconds\": ")[1].split(",")[0].split(".")[0]) + 2
+                except Exception:
+                    pass
+                print(f"  [Auditor] rate limit, жду {_wait}с...")
+                _time.sleep(_wait)
 
         usage = getattr(response, "usage", None)
         self.last_usage = {
