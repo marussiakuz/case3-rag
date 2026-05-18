@@ -5,7 +5,7 @@ Wants=postgresql.service
 
 [Service]
 Type=simple
-User=greendata
+User=ubuntu
 WorkingDirectory=/opt/greendata
 EnvironmentFile=/etc/greendata/env
 

@@ -11,6 +11,8 @@ if [ ! -d ".venv" ]; then
     python3.11 -m venv .venv
 fi
 .venv/bin/pip install -q --upgrade pip
+# CPU-only torch — вдвое меньше, чем CUDA-версия по умолчанию
+.venv/bin/pip install -q torch --index-url https://download.pytorch.org/whl/cpu
 .venv/bin/pip install -q -r requirements.txt
 
 # Пересобираем RAG-индексы только если изменились knowledge_base файлы.
