@@ -28,9 +28,7 @@ lint:
   before_script:
     - pip install -q pyflakes
   script:
-    - python -m pyflakes baseline1.py generator/generator.py auditor/auditor.py
-      orchestrator/orchestrator.py meta_auditor/opus_reviewer.py
-      rag_pipeline/rag_tools.py rag_pipeline/metrics.py
+    - python -m pyflakes baseline1.py generator/generator.py auditor/auditor.py orchestrator/orchestrator.py meta_auditor/opus_reviewer.py rag_pipeline/rag_tools.py rag_pipeline/metrics.py
   rules:
     - if: '$CI_COMMIT_BRANCH == "master"'
 
@@ -61,15 +59,9 @@ deploy:
         . "$YC_VM_USER@$YC_VM_HOST:$APP_DIR/"
 
     # 2. Кладём секреты в /etc/greendata/secrets на VM
-    - |
-      ssh "$YC_VM_USER@$YC_VM_HOST" "sudo tee /etc/greendata/secrets > /dev/null" <<SECRETS
-      CEREBRAS_API_KEY=${CEREBRAS_API_KEY}
-      GROQ_API_KEY=${GROQ_API_KEY}
-      PG_PASSWORD=${PG_PASSWORD}
-      PG_HOST=localhost
-      PG_PORT=5432
-      PG_USER=postgres
-      SECRETS
+    - printf 'CEREBRAS_API_KEY=%s\nGROQ_API_KEY=%s\nPG_PASSWORD=%s\nPG_HOST=localhost\nPG_PORT=5432\nPG_USER=postgres\n'
+      "$CEREBRAS_API_KEY" "$GROQ_API_KEY" "$PG_PASSWORD"
+      | ssh "$YC_VM_USER@$YC_VM_HOST" "sudo tee /etc/greendata/secrets > /dev/null"
 
     # 3. Определяем нужна ли пересборка RAG (изменился knowledge_base?)
     - |
