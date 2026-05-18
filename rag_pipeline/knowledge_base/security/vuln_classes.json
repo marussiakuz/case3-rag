@@ -9,12 +9,13 @@
       "конкатенация строк с переменными: || или CONCAT() с user input",
       "format() или sprintf() с %s без USING",
       "динамический SQL через EXECUTE без параметров",
-      "строковые шаблоны вида WHERE id = плюс переменная"
+      "строковые шаблоны вида WHERE id = плюс переменная",
+      "использование quote_literal вместо параметров"
     ],
-    "example_bad": "-- УЯЗВИМО: конкатенация пользовательского ввода\n-- user_input может содержать: ' OR '1'='1\nSELECT * FROM sys_employee WHERE name = '' || user_input || '';",
+    "example_bad": "-- УЯЗВИМО: конкатенация пользовательского ввода\n-- user_input может содержать: ' OR '1'='1\nSELECT * FROM sys_employee WHERE name = '' || user_input || '';\n-- УЯЗВИМО: использование format() для вставки пользовательского ввода:\n-- user_input может содержать: ' OR '1'='1\nformat('SELECT * FROM sys_company WHERE name = ''%s''', user_input);\n--УЯЗВИМО: использование sprintf()  для вставки пользовательского ввода:\n-- user_input может содержать: ' OR '1'='1\nsprintf(\"SELECT * FROM sys_company WHERE inn = '%s'\", user_input);",
     "example_good": "-- БЕЗОПАСНО: параметризованный запрос\nSELECT id, name, sur_name FROM sys_employee WHERE name = $1;",
     "recommendation": "Всегда использовать параметризованные запросы ($1, $2, ...). Никогда не строить SQL через конкатенацию строк с пользовательскими данными.",
-    "text": "SQL Injection классический. Риск 10/10. Критически опасная уязвимость. Динамическая конкатенация пользовательского ввода без параметризации. Признаки: использование || для строк в WHERE, формирование строки запроса через format() без USING, EXECUTE с конкатенированными строками. Пример уязвимого кода: SELECT * FROM sys_employee WHERE name = '' || input || ''. Пример безопасного кода: SELECT id, name FROM sys_employee WHERE name = $1. Исправление: заменить конкатенацию на placeholder $1, $2 и передавать значения через USING или на уровне приложения."
+    "text": "SQL Injection классический. Риск 10/10. Критически опасная уязвимость. Динамическая конкатенация пользовательского ввода без параметризации. Признаки: использование || для строк в WHERE, формирование строки запроса через format() без USING, формирование строки запроса через sprintf() без USING,  EXECUTE с конкатенированными строками. Примеры уязвимого кода: SELECT * FROM sys_employee WHERE name = '' || input || ''; format('SELECT * FROM sys_company WHERE name = ''%s''', user_input); sprintf(\"SELECT * FROM sys_company WHERE inn = '%s'\", user_input).  Пример безопасного кода: SELECT id, name FROM sys_employee WHERE name = $1. Исправление: заменить конкатенацию на placeholder $1, $2 и передавать значения через USING или на уровне приложения."
   },
   {
     "vuln_class": "SQL_INJ_UNION",
@@ -27,7 +28,7 @@
       "UNION ALL SELECT",
       "NULL, NULL, NULL паттерн в UNION (разведка числа колонок)"
     ],
-    "example_bad": "-- УЯЗВИМО: UNION для кражи данных из других таблиц\nSELECT id, name FROM sys_employee WHERE id = 1\nUNION SELECT inn, attr_email FROM sys_company;",
+    "example_bad": "-- УЯЗВИМО: UNION для кражи данных из других таблиц\nSELECT id, name FROM sys_employee WHERE id = 1\nUNION SELECT inn, attr_email FROM sys_company;\n-- УЯЗВИМО: разведка структуры (определение числа колонок)\nSELECT * FROM business_segment WHERE id = 1 UNION SELECT NULL, NULL;",
     "example_good": "-- БЕЗОПАСНО: без динамического SQL, фиксированный запрос\nSELECT id, name FROM sys_employee WHERE id = $1;",
     "recommendation": "Не допускать динамической подстановки частей запроса. UNION в легитимных запросах должен быть статическим и явным в коде.",
     "text": "Union-based Injection. Риск 9/10. Использование UNION SELECT для извлечения данных из произвольных таблиц. Признаки: UNION SELECT или UNION ALL SELECT в динамически сформированном запросе, паттерн NULL NULL NULL для разведки. Опасно тем, что атакующий может прочитать любую таблицу: sys_employee, sys_company, credit_contract, scp_project_ans. Защита: параметризация всего пользовательского ввода, запрет динамического UNION."
@@ -36,18 +37,19 @@
     "vuln_class": "DML_NO_WHERE",
     "name": "UPDATE/DELETE без WHERE",
     "risk_score": 9,
-    "description": "Операция изменения или удаления без условия фильтрации. Затрагивает все строки таблицы. Необратимое уничтожение данных.",
+    "description": "Операция изменения или удаления без корректного условия фильтрации или с условиями, эквивалентными отсутствию фильтрации (WHERE 1=1, TRUE). Затрагивает все строки таблицы. Необратимое уничтожение данных.",
     "why_dangerous": "DELETE FROM credit_contract без WHERE удалит все кредитные договоры. UPDATE sys_employee SET status=0 без WHERE отключит всех сотрудников. Восстановление возможно только из резервной копии.",
     "detection_patterns": [
       "UPDATE table_name SET ... (без WHERE)",
       "DELETE FROM table_name (без WHERE или с пустым WHERE)",
       "TRUNCATE TABLE (всегда удаляет все строки)",
-      "UPDATE с WHERE 1=1 или WHERE true (эквивалент отсутствия фильтра)"
+      "UPDATE с WHERE 1=1 или WHERE true (эквивалент отсутствия фильтра)",
+      "DELETE с WHERE 1=1 или WHERE true (эквивалент отсутствия фильтра)"
     ],
-    "example_bad": "-- УЯЗВИМО: удаляет ВСЕ записи!\nDELETE FROM scp_application;\n\n-- УЯЗВИМО: обновляет ВСЕ строки!\nUPDATE sys_employee SET status = 0;",
+    "example_bad": "-- УЯЗВИМО: удаляет ВСЕ записи!\nDELETE FROM scp_application;\n\n-- УЯЗВИМО: обновляет ВСЕ строки!\nUPDATE sys_employee SET status = 0;\n-- УЯЗВИМО: удаление с использованием фильтра WHERE 1=1 удаляет ВСЕ записи!\nDELETE FROM acc_number WHERE 1=1;\n-- УЯЗВИМО: обновление с использованием фильтра WHERE true обновляет ВСЕ записи!\n UPDATE credit_contract SET status = 0 WHERE true;\n-- УЯЗВИМО: удаляет ВСЕ записи!\nTRUNCATE TABLE scp_collateral_app;",
     "example_good": "-- БЕЗОПАСНО: удалить конкретное заявление\nDELETE FROM scp_application WHERE id = $1 AND status = 1;\n\n-- БЕЗОПАСНО: обновить конкретного сотрудника\nUPDATE sys_employee SET status = 0 WHERE id = $1;",
     "recommendation": "Каждый UPDATE и DELETE должен содержать WHERE с конкретным условием. Предпочтительно фильтровать по первичному ключу (id). Никогда не использовать WHERE 1=1.",
-    "text": "UPDATE DELETE без WHERE. Риск 9/10. Массовое изменение или удаление всех строк таблицы. Признаки: UPDATE или DELETE без секции WHERE, UPDATE с WHERE 1=1, TRUNCATE TABLE. Катастрофические последствия: потеря всех кредитных договоров (credit_contract), заявок (scp_application), данных сотрудников (sys_employee). Защита: обязательный WHERE с конкретным условием, фильтрация по primary key."
+    "text": "UPDATE DELETE без WHERE. Риск 9/10. Массовое изменение или удаление всех строк таблицы. Признаки: UPDATE или DELETE без секции WHERE, UPDATE с WHERE 1=1, TRUNCATE TABLE. Катастрофические последствия: потеря всех кредитных договоров (credit_contract), заявок (scp_application), данных сотрудников (sys_employee). Примеры уязвимого кода: DELETE FROM scp_application; DELETE FROM acc_number WHERE 1=1; TRUNCATE TABLE scp_collateral_app; UPDATE sys_employee SET status = 0; UPDATE credit_contract SET status = 0 WHERE true; Защита: обязательный WHERE с конкретным условием, фильтрация по primary key."
   },
   {
     "vuln_class": "SELECT_STAR",
@@ -63,30 +65,51 @@
     "example_bad": "-- УЯЗВИМО: возвращает sensitive поля email, phone, inn\nSELECT * FROM sys_employee;\nSELECT * FROM sys_company WHERE status = 1;",
     "example_good": "-- БЕЗОПАСНО: только нужные поля\nSELECT id, name, sur_name, first_name, org_id FROM sys_employee WHERE status = 1;\nSELECT id, name, short_name, business_segment FROM sys_company WHERE status = 1;",
     "recommendation": "Явно перечислять только необходимые поля. Особенно критично для таблиц sys_employee, sys_company, credit_contract, scp_project_ans, в которых есть чувствительные данные.",
-    "text": "Избыточный SELECT *. Риск 5/10. Выборка всех колонок таблицы включая чувствительные данные. Признаки: SELECT * FROM, SELECT alias.*. В схеме GreenData опасно для таблиц: sys_employee (email, phone, inner_emp_phone), sys_company (inn, attr_email, contact_phone), credit_contract (суммы, даты, номера договоров). Защита: явно перечислять только нужные поля запроса."
+    "text": "Избыточный SELECT *. Риск 5/10. Выборка всех колонок таблицы включая чувствительные данные. Признаки: SELECT * FROM, SELECT alias.*. В схеме GreenData опасно для таблиц: sys_employee (email, phone, inner_emp_phone), sys_company (inn, attr_email, contact_phone), credit_contract (суммы, даты, номера договоров), afhd_ac_trans_link (дебит/кредит id), corp_tech_application (credit_logic_id, cred_depart_opinion_txt), count_turnover(turnover_credit, output_balance_credit, input_balace_credit), dict_product(информация о продукте), fs_file (внутренние имя файла), ic_application(логика кредитования), mler_application(логика кредитования), scp_amd_product(информация о кредитовании), scp_application(логика кредитования), scp_decision_quest (цель кредита, лимит и другая информация), scp_dict_product_na(credit_product), scp_sec_check_res(история кредитования), scp_project_ans(информация о кредитовании). Примеры уязвимого кода: SELECT * FROM sys_employee; SELECT * FROM sys_company; SELECT * FROM credit_contract;  Защита: явно перечислять только нужные поля запроса."
   },
   {
     "vuln_class": "DIRECT_SENSITIVE",
     "name": "Прямой доступ к чувствительным полям",
     "risk_score": 6,
-    "description": "Запрос полей, содержащих персональные данные (email, phone, inn) или финансовую информацию (credit_amount, credit_contract_number) без необходимости.",
-    "why_dangerous": "Нарушение 152-ФЗ о персональных данных. Утечка финансовых данных клиентов. Данные могут попасть в логи, кэш, ответы API.",
+    "description": "Запрос полей, содержащих персональные данные (email, phone, inn), финансовую информацию (credit_amount, credit_contract_number) или другие чувствительные данные без необходимости.",
+    "why_dangerous": "Нарушение 152-ФЗ о персональных данных. Утечка финансовых данных клиентов. Утечка информации, которые могут повлечь за собой репутационные, финансовые и другие риски. Данные могут попасть в логи, кэш, ответы API.",
     "detection_patterns": [
       "поля: email, phone, inner_emp_phone, email_confirmed, phone_confirmed",
       "поля: inn, attr_email, contact_phone из sys_company",
       "поля: credit_amount, credit_contract_number, uid_credit",
-      "поля: credit_logic_id, cred_depart_opinion_txt, exp_limit_credit_rub"
+      "поля: credit_logic_id, cred_depart_opinion_txt, exp_limit_credit_rub",
+      "поля: credit_history_comm, sf_credit_history_comm",
+      "поля: credit_group_id, is_blanc_credit, credit_analyst_id, credit_line_term",
+      "поля: credit_product",
+      "поля: credit_purpose_id, est_credit_limit,credit_report_class",
+      "поля: ff_inner_name",
+      "поля: credit_interest_rate, min_sum_credit, max_sum_credit, term_limit_credit",
+      "поля: credit_end_date, credit_start_date",
+      "поля: turnover_credit, output_balance_credit, input_balace_credit",
+      "поля: debit_credit_id"
     ],
     "sensitive_fields_in_schema": {
       "sys_employee": ["email", "phone", "email_confirmed", "phone_confirmed", "inner_emp_phone"],
       "sys_company": ["inn", "attr_email", "contact_phone"],
       "credit_contract": ["credit_contract_number", "credit_amount", "credit_start_date", "credit_end_date", "uid_credit"],
-      "scp_project_ans": ["credit_analyst_id", "is_blanc_credit", "exp_limit_credit_rub", "credit_group_id"]
+      "scp_project_ans": ["credit_analyst_id", "is_blanc_credit", "exp_limit_credit_rub", "credit_group_id"],
+      "scp_sec_check_res": ["credit_history_comm", "sf_credit_history_comm"],
+      "scp_dict_product_na": ["credit_product"],
+      "scp_decision_quest": ["credit_purpose_id", "est_credit_limit", "credit_report_class"],
+      "scp_application": ["credit_logic_id"],
+      "scp_amd_product": ["is_blanc_credit", "exp_limit_credit_rub"],
+      "mler_application": ["credit_logic_id"],
+      "ic_application": ["credit_logic_id"],
+      "fs_file": ["ff_inner_name"],
+      "dict_product": ["term_limit_credit", "max_sum_credit", "min_sum_credit", "credit_interest_rate"],
+      "count_turnover": ["turnover_credit", "output_balance_credit", "input_balace_credit"],
+      "corp_tech_application": ["credit_logic_id", "cred_depart_opinion_txt"],
+      "afhd_ac_trans_link": ["debit_credit_id"]
     },
-    "example_bad": "-- УЯЗВИМО: запрашивает sensitive email и phone без необходимости\nSELECT id, name, email, phone, inner_emp_phone FROM sys_employee;",
-    "example_good": "-- БЕЗОПАСНО: только нужные для бизнес-задачи поля\nSELECT e.id, e.name, e.sur_name, e.first_name, e.org_id\nFROM sys_employee e\nWHERE e.status = 1;",
+    "example_bad": "-- УЯЗВИМО: запрашивает sensitive email и phone без необходимости\nSELECT id, name, email, phone, inner_emp_phone FROM sys_employee;\n-- УЯЗВИМО: запрашивает sensitive credit_contract_number и credit_amount без необходимости\nSELECT credit_contract_number, credit_amount, name FROM credit_contract WHERE type_id = 2;",
+    "example_good": "-- БЕЗОПАСНО: только нужные для бизнес-задачи поля\nSELECT e.id, e.name, e.sur_name, e.first_name, e.org_id\nFROM sys_employee e\nWHERE e.status = 1;\n-- БЕЗОПАСНО: маскирование полей с чувствительными данными:\nSELECT CONCAT(LEFT(credit_contract_number, 4), REPEAT('*', GREATEST(LENGTH(credit_contract_number) - 8, 0)), RIGHT(credit_contract_number, 4)) AS credit_contract_number_masked, CONCAT('***', RIGHT(CAST(credit_amount AS TEXT), 2)) AS credit_amount_masked, name FROM credit_contract WHERE type_id = 2;",
     "recommendation": "Включать sensitive-поля только если они явно нужны для задачи. Рассмотреть маскирование: LEFT(email, 3) || '***' AS email_masked.",
-    "text": "Прямой доступ к чувствительным полям. Риск 6/10. Запрос полей с персональными или финансовыми данными без обоснованной необходимости. Чувствительные поля в схеме GreenData: sys_employee.email, phone, inner_emp_phone; sys_company.inn, contact_phone, attr_email; credit_contract.credit_amount, credit_contract_number, uid_credit; scp_project_ans.exp_limit_credit_rub, is_blanc_credit. Защита: включать sensitive поля только по явной необходимости, маскировать там где возможно."
+    "text": "Прямой доступ к чувствительным полям. Риск 6/10. Запрос полей с персональными или финансовыми данными без обоснованной необходимости. Чувствительные поля в схеме GreenData: sys_employee.email, phone, inner_emp_phone; sys_company.inn, contact_phone, attr_email; credit_contract.credit_amount, credit_contract_number, uid_credit; scp_project_ans.exp_limit_credit_rub, is_blanc_credit; afhd_ac_trans_link.debit_credit_id; corp_tech_application.credit_logic_id, cred_depart_opinion_txt; count_turnover.turnover_credit, output_balance_credit, input_balace_credit; dict_product.term_limit_credit, max_sum_credit, min_sum_credit, credit_interest_rate; fs_file.ff_inner_name; ic_application.credit_logic_id; mler_application.credit_logic_id; scp_amd_product.is_blanc_credit, exp_limit_credit_rub; scp_application.credit_logic_id; scp_decision_quest.credit_purpose_id, est_credit_limit, credit_report_class; scp_sec_check_res.credit_history_comm, sf_credit_history_comm; scp_dict_product_na.credit_product. Защита: включать sensitive поля только по явной необходимости, маскировать там где возможно."
   },
   {
     "vuln_class": "NO_PAGINATION",
@@ -100,16 +123,16 @@
       "LIMIT без OFFSET (нет пагинации)",
       "очень большой LIMIT (более 10000)"
     ],
-    "example_bad": "-- УЯЗВИМО: может вернуть миллионы строк транзакций\nSELECT * FROM afhd_ac_trans_link WHERE account_date > '2024-01-01';\n\n-- УЯЗВИМО: без пагинации\nSELECT id, name FROM sys_employee ORDER BY id;",
+    "example_bad": "-- УЯЗВИМО: может вернуть миллионы строк транзакций\nSELECT * FROM afhd_ac_trans_link WHERE account_date > '2024-01-01';\n\n-- УЯЗВИМО: без пагинации\nSELECT id, name FROM sys_employee ORDER BY id;\n-- УЯЗВИМО: слишком большой LIMIT\nSELECT id, name, user_id, org_id FROM acc_number\nWHERE status = 1\nORDER BY name\nLIMIT 50000;",
     "example_good": "-- БЕЗОПАСНО: правильная пагинация\nSELECT id, name, sur_name FROM sys_employee\nORDER BY id\nLIMIT $1 OFFSET $2;\n\n-- БЕЗОПАСНО: разумный лимит для аналитики\nSELECT account_date, after_amount FROM afhd_ac_trans_link\nWHERE account_date >= $1\nORDER BY account_date DESC\nLIMIT 1000;",
     "recommendation": "Всегда добавлять LIMIT. Для пагинации использовать LIMIT $page_size OFFSET $offset. Максимальный разумный лимит для аналитических запросов — 10000 строк.",
-    "text": "Отсутствие пагинации и LIMIT. Риск 4/10. Запрос без ограничения количества строк. Признаки: SELECT без LIMIT, SELECT без FETCH FIRST. Особенно опасно для больших таблиц: afhd_ac_trans_link (транзакции), scp_application (заявки). Защита: добавить LIMIT с разумным значением (100-10000), для пагинации LIMIT $1 OFFSET $2."
+    "text": "Отсутствие пагинации и LIMIT. Риск 4/10. Запрос без ограничения количества строк. Признаки: SELECT без LIMIT, SELECT без FETCH FIRST, LIMIT с большим значением. Особенно опасно для больших таблиц: afhd_ac_trans_link (транзакции), scp_application (заявки). Примеры уязвимых запросов: SELECT id, transaction_id, obj_owner_id  FROM afhd_ac_trans_link WHERE account_date > '2024-01-01'; SELECT id, name, user_id, org_id FROM acc_number WHERE status = 1 ORDER BY name LIMIT 50000;  Защита: добавить LIMIT с разумным значением (100-10000), для пагинации LIMIT $1 OFFSET $2."
   },
   {
     "vuln_class": "SQL_INJ_TIME",
     "name": "Time-based blind Injection",
     "risk_score": 8,
-    "description": "Использование pg_sleep() или тяжёлых вычислений для разведки структуры БД через время ответа. Позволяет извлекать данные по одному биту.",
+    "description": "Blind SQL Injection техника, использующая задержки выполнения запроса (pg_sleep, условные вычисления, expensive queries) для извлечения информации по времени ответа сервера. Применяется в случаях, когда приложение не возвращает ошибки или результаты SQL напрямую. Позволяет поэтапно определять структуру БД, имена таблиц, наличие записей и значения данных.",
     "why_dangerous": "Атакующий может определить структуру БД, имена таблиц и значения полей без видимых изменений в ответе, просто измеряя время ответа сервера.",
     "detection_patterns": [
       "pg_sleep(",
@@ -118,17 +141,17 @@
       "CASE WHEN condition THEN pg_sleep(N)",
       "generate_series с очень большим диапазоном как замедлитель"
     ],
-    "example_bad": "-- УЯЗВИМО: разведка через время ответа\nSELECT CASE\n  WHEN (SELECT COUNT(*) FROM sys_employee WHERE sur_name LIKE 'A%') > 0\n  THEN pg_sleep(5)\n  ELSE pg_sleep(0)\nEND;\n\n-- УЯЗВИМО: тяжёлое вычисление как замедлитель\nSELECT COUNT(*) FROM generate_series(1, 100000000);",
+    "example_bad": "-- УЯЗВИМО: разведка через время ответа\nSELECT CASE\n  WHEN (SELECT COUNT(*) FROM sys_employee WHERE sur_name LIKE 'A%') > 0\n  THEN pg_sleep(5)\n  ELSE pg_sleep(0)\nEND;\n\n-- УЯЗВИМО: тяжёлое вычисление как замедлитель\nSELECT COUNT(*) FROM generate_series(1, 100000000);\n -- УЯЗВИМО: определение существования таблицы через задержку\nSELECT CASE  WHEN EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'business_segment') THEN pg_sleep(5) ELSE pg_sleep(0) END;",
     "example_good": "-- Нет легитимного use-case для pg_sleep в продуктивных запросах.\n-- Если нужна задержка в тестах - только в изолированной среде.",
     "recommendation": "Запретить pg_sleep() в пользовательских запросах. Не допускать generate_series с неограниченным диапазоном. Ограничить время выполнения запроса через statement_timeout.",
-    "text": "Time-based blind Injection. Риск 8/10. Использование pg_sleep() или тяжёлых операций для разведки через время ответа. Признаки: pg_sleep( в тексте запроса, CASE WHEN ... THEN pg_sleep(), generate_series с очень большим диапазоном. Защита: блокировать любое использование pg_sleep в пользовательских запросах, устанавливать statement_timeout."
+    "text": "Time-based blind Injection. Риск 8/10. Использование pg_sleep() или тяжёлых операций для разведки через время ответа. Признаки: pg_sleep( в тексте запроса, CASE WHEN ... THEN pg_sleep(), generate_series с очень большим диапазоном. Примеры уязвимого кода: SELECT CASE WHEN (SELECT COUNT(*) FROM sys_employee WHERE sur_name LIKE 'A%') > 0 THEN pg_sleep(5) ELSE pg_sleep(0) END; SELECT COUNT(*) FROM generate_series(1, 100000000); Защита: блокировать любое использование pg_sleep в пользовательских запросах, устанавливать statement_timeout."
   },
   {
     "vuln_class": "PRIV_ESCALATE",
     "name": "Privilege Escalation через EXECUTE",
     "risk_score": 8,
-    "description": "Вызов EXECUTE с динамически формируемой строкой внутри функций с правами SECURITY DEFINER. Позволяет выполнять произвольный SQL от имени владельца функции.",
-    "why_dangerous": "Функция с SECURITY DEFINER работает с правами своего создателя. Если в ней есть EXECUTE с пользовательским вводом — атакующий получает права суперпользователя через эту функцию.",
+    "description": "Использование динамического SQL (EXECUTE) внутри функций SECURITY DEFINER с передачей пользовательского ввода в SQL строку. Позволяет выполнять произвольные SQL-команды с правами владельца функции, что приводит к privilege escalation и обходу ограничений доступа.",
+    "why_dangerous": "Функции SECURITY DEFINER выполняются с правами владельца функции, а не вызывающего пользователя. При небезопасном EXECUTE атакующий может выполнять SQL от имени более привилегированного пользователя: читать системные таблицы, изменять критичные данные, обходить ACL и в некоторых случаях получать superuser-level доступ.",
     "detection_patterns": [
       "EXECUTE в функции с SECURITY DEFINER",
       "EXECUTE format() с конкатенацией пользовательских данных",
@@ -154,5 +177,45 @@
     "example_good": "-- БЕЗОПАСНО: USING для параметров или прямой запрос\nCREATE OR REPLACE FUNCTION search_emp(search_name text)\nRETURNS SETOF sys_employee AS $$\nBEGIN\n  RETURN QUERY\n  SELECT id, name, sur_name FROM sys_employee WHERE name = search_name;\n  -- Или с динамическим SQL:\n  -- EXECUTE 'SELECT id, name FROM sys_employee WHERE name = $1' USING search_name;\nEND;\n$$ LANGUAGE plpgsql;",
     "recommendation": "В PL/pgSQL использовать EXECUTE ... USING $1, $2 для передачи значений. Для идентификаторов (имён таблиц/колонок) — format() с %I. Никогда не %s для пользовательских значений.",
     "text": "PL/pgSQL небезопасный EXECUTE. Риск 9/10. Динамический SQL через EXECUTE format() без USING в хранимых процедурах. Признаки: EXECUTE с %s и пользовательскими данными, EXECUTE sql_string где строка формируется через конкатенацию, отсутствие USING в EXECUTE. Защита: EXECUTE 'SQL с $1' USING значение, для идентификаторов format() с %I."
+  },
+  {
+  "vuln_class": "SCHEMA_LEAK",
+  "name": "Разведка схемы через information_schema",
+  "risk_score": 7,
+  "description": "Получение структуры базы данных через information_schema, pg_catalog и системные представления PostgreSQL. Позволяет определить таблицы, колонки, типы данных, индексы и подготовить дальнейшие атаки.",
+  "why_dangerous": "Атакующий может построить полную карту БД: узнать существование таблиц sys_employee, credit_contract, sys_company, определить названия колонок, первичные ключи, связи между таблицами и использовать эту информацию для SQL Injection, privilege escalation или targeted data exfiltration.",
+  "detection_patterns": [
+    "SELECT из information_schema.tables",
+    "SELECT из information_schema.columns",
+    "SELECT из pg_catalog",
+    "SELECT из pg_tables",
+    "SELECT table_name FROM information_schema.tables",
+    "SELECT column_name FROM information_schema.columns",
+    "доступ к pg_class, pg_attribute, pg_namespace",
+    "массовое перечисление таблиц или колонок",
+    "UNION SELECT с information_schema"
+  ],
+  "example_bad": "-- УЯЗВИМО: атакующий узнаёт все таблицы\nSELECT table_name FROM information_schema.tables;\n-- УЯЗВИМО: получение всех колонок таблицы\nSELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'sys_employee';\n-- УЯЗВИМО: разведка через pg_catalog\nSELECT relname FROM pg_class WHERE relkind = 'r';",
+  "example_good": "-- БЕЗОПАСНО: ограниченить доступ к системным представлениям",
+  "recommendation": "Не предоставлять пользовательским запросам доступ к information_schema и pg_catalog без необходимости. Использовать least privilege, ограничивать доступ к системным представлениям, запрещать dynamic SQL enumeration и контролировать UNION SELECT с системными таблицами.",
+  "text": "Разведка схемы через information_schema. Риск 7/10. Получение структуры базы данных через information_schema, pg_catalog, pg_tables и другие системные представления PostgreSQL. Признаки: SELECT table_name FROM information_schema.tables, SELECT column_name FROM information_schema.columns, запросы к pg_class, pg_attribute, pg_namespace, UNION SELECT с системными таблицами. Опасность: атакующий может определить структуру БД, имена таблиц (sys_employee, credit_contract, sys_company), названия колонок, типы данных, ключи и связи между таблицами. Часто используется как этап разведки перед SQL Injection, UNION-based extraction или privilege escalation. Защита: ограничение доступа к системным представлениям, least privilege, запрет dynamic SQL enumeration, контроль доступа к pg_catalog и information_schema."
+  },
+  {
+  "vuln_class": "EXCESSIVE_PRIVILEGE",
+  "name": "Избыточный доступ к данным вне мандата",
+  "risk_score": 6,
+  "description": "Пользователь или роль получает доступ к данным, которые выходят за рамки его бизнес-или доменного мандата. Проблема разграничения доступа и фильтрации данных на уровне запросов.",
+  "why_dangerous": "Пользователь может видеть или изменять данные других отделов, клиентов или бизнес-юнитов (например, сотрудник одного филиала видит кредиты другого филиала). Это приводит к утечкам персональных и финансовых данных и нарушению принципа least privilege.",
+  "detection_patterns": [
+    "SELECT * без фильтрации по org_id или схожим полям",
+    "отсутствие условий WHERE по user_id",
+    "доступ к таблицам без row-level filtering",
+    "JOIN без ограничения области доступа",
+    "использование широких ролей (SELECT ALL) вместо scoped access"
+  ],
+  "example_bad": "-- УЯЗВИМО: доступ ко всем данным без ограничения мандата\nSELECT id, name, email\nFROM sys_employee;\n\n-- УЯЗВИМО: нет фильтра по org_id\nSELECT * FROM credit_contract;",
+  "example_good": "-- БЕЗОПАСНО: фильтрация по области доступа пользователя\nSELECT id, name, email\nFROM sys_employee\nWHERE org_id = $1;\n\n-- БЕЗОПАСНО: ограничение по org_id\nSELECT id, status\nFROM credit_contract\nWHERE org_id = $1;\n\n-- БЕЗОПАСНО: row-level security через WHERE или RLS политики",
+  "recommendation": "Всегда применять фильтрацию по org_id или user scope на уровне всех SELECT запросов. Использовать Row Level Security (RLS) в PostgreSQL и не полагаться только на прикладную логику.",
+  "text": "Избыточный доступ к данным вне мандата. Риск 6/10. Пользователь получает доступ к данным, которые не относятся к его организации, роли или бизнес-области. Признаки: SELECT * без фильтрации по org_id или user_id, отсутствие WHERE ограничений, JOIN без scoping условий, доступ к данным всех клиентов или филиалов. Последствия: утечка персональных и финансовых данных, нарушение принципа least privilege, доступ к чужим кредитным договорам (credit_contract), сотрудникам (sys_employee) и внутренним данным организации. Защита: обязательная фильтрация по org_id или role scope, использование Row Level Security (RLS), централизованные политики доступа и запрет необоснованных SELECT * без ограничений."
   }
 ]
