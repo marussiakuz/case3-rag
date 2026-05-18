@@ -190,5 +190,645 @@
     "use_case": "Отчёты где поле нужно показать, но не полностью (email, phone, inn)",
     "text": "Маскирование sensitive данных в PostgreSQL. Для email: REGEXP_REPLACE(email, '(.).+(@.+)', '\\1***\\2') или LEFT(email, 3) || '***' || SUBSTRING(email FROM POSITION('@' IN email)). Для телефона: LEFT(phone, 3) || '***' || RIGHT(phone, 2). Для ИНН (10-12 цифр): LEFT(inn, 3) || '****' || RIGHT(inn, 2). Маскировать, когда поле нужно показать частично для идентификации, но полные данные не нужны.",
     "example": "-- Список сотрудников с маскированным email и телефоном\nSELECT\n  e.id,\n  e.sur_name,\n  e.first_name,\n  -- Маскируем: show***@domain.com\n  CASE\n    WHEN e.email IS NULL THEN NULL\n    ELSE LEFT(e.email, 3) || '***' ||\n         SUBSTRING(e.email FROM POSITION('@' IN e.email))\n  END AS email_masked,\n  -- Маскируем телефон: +7***99\n  CASE\n    WHEN e.phone IS NULL THEN NULL\n    ELSE LEFT(e.phone, 2) || '****' || RIGHT(e.phone, 2)\n  END AS phone_masked\nFROM sys_employee e\nWHERE e.status = 1\nORDER BY e.sur_name\nLIMIT $1 OFFSET $2;"
+  },
+  {
+    "pattern_id": "scp_app_list_by_company",
+    "pattern_type": "СКП. Список заявок компании",
+    "description": "Выборка всех заявок по конкретной компании-инициатору с состоянием",
+    "use_case": "Показать заявки клиента, история заявок организации",
+    "text": "Заявки компании в GreenData через scp_application. Поле org_id → sys_company.id — подразделение/клиент. Поле initiator_id → sys_company.id — инициатор (клиент). Текущее состояние через afp_state_id → sys_state.id. Активные записи: status = 1. Всегда сортировать по create_date DESC и добавлять LIMIT. Поле credit_logic_id → scp_techcred.id — технология кредитования. Поле lim_sum — запрошенный лимит.",
+    "example": "-- Все заявки компании с текущим состоянием\nSELECT\n  sa.id,\n  sa.create_date,\n  sa.lim_sum,\n  ss.name         AS state_name,\n  e.sur_name || ' ' || COALESCE(e.first_name, '') AS manager\nFROM scp_application sa\nINNER JOIN sys_state    ss ON ss.id = sa.afp_state_id\nLEFT  JOIN sys_employee e  ON e.id  = sa.emp_id\nWHERE sa.org_id = $1\n  AND sa.status = 1\nORDER BY sa.create_date DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "scp_app_by_state",
+    "pattern_type": "СКП. Заявки по состоянию",
+    "description": "Фильтрация заявок по конкретному статусу или группе статусов",
+    "use_case": "Заявки в статусе 'На рассмотрении', 'Одобрено', 'Отказано'",
+    "text": "Фильтрация scp_application по состоянию. Состояние хранится в afp_state_id → sys_state.id. Для фильтра по имени статуса: JOIN с sys_state и WHERE ss.name ILIKE. Для фильтра по нескольким статусам: WHERE sa.afp_state_id = ANY(ARRAY[$1, $2]). Поле auto_check_status → sys_state.id — результат автопроверки. Поле is_test = 1 для тестовых заявок — обычно исключать.",
+    "example": "-- Заявки в конкретном состоянии\nSELECT\n  sa.id,\n  sa.create_date,\n  sa.lim_sum,\n  c.name          AS company_name,\n  ss.name         AS state_name\nFROM scp_application sa\nINNER JOIN sys_state  ss ON ss.id = sa.afp_state_id\nINNER JOIN sys_company c ON c.id  = sa.org_id\nWHERE ss.name ILIKE $1\n  AND sa.status = 1\n  AND COALESCE(sa.is_test, 0) = 0\nORDER BY sa.create_date DESC\nLIMIT 200;"
+  },
+  {
+    "pattern_id": "scp_app_count_by_period",
+    "pattern_type": "СКП. Количество заявок за период",
+    "description": "Подсчёт и группировка заявок по временным периодам",
+    "use_case": "Сколько заявок подано за месяц, квартал, динамика по неделям",
+    "text": "Агрегация scp_application по периодам. DATE_TRUNC('month', create_date) для группировки по месяцам. BETWEEN для выборки диапазона. COUNT(*) для подсчёта, SUM(lim_sum) для суммы запрошенных лимитов. Исключать тестовые (is_test != 1) и удалённые (status = 1). Группировать совместно с sys_state для разбивки по статусам.",
+    "example": "-- Динамика заявок по месяцам\nSELECT\n  DATE_TRUNC('month', sa.create_date)  AS month,\n  COUNT(*)                              AS total_count,\n  SUM(sa.lim_sum)                       AS total_lim_sum,\n  COUNT(*) FILTER (WHERE ss.name ILIKE '%одобр%') AS approved_count\nFROM scp_application sa\nINNER JOIN sys_state ss ON ss.id = sa.afp_state_id\nWHERE sa.create_date BETWEEN $1 AND $2\n  AND sa.status = 1\n  AND COALESCE(sa.is_test, 0) = 0\nGROUP BY DATE_TRUNC('month', sa.create_date)\nORDER BY month\nLIMIT 24;"
+  },
+  {
+    "pattern_id": "scp_app_with_analyst",
+    "pattern_type": "СКП. Заявки с аналитиком и менеджером",
+    "description": "Заявки с данными назначенных сотрудников: аналитик, менеджер, куратор",
+    "use_case": "Нагрузка на аналитика, заявки куратора, список заявок менеджера",
+    "text": "Сотрудники в scp_application: emp_id → sys_employee.id (менеджер/ответственный), credit_logic_id — технология (не сотрудник!), curator_head_id → sys_employee.id (куратор), scp_arm_manager_id → sys_employee.id (ARM-менеджер), resp_cond_coord → sys_employee.id (ответственный за согласование условий). Для аналитика по заявке нужен JOIN с scp_project_ans через req_link_id: scp_project_ans.credit_analyst_id → sys_employee.id. Все поля сотрудника: sur_name, first_name, second_name — конкатенировать через COALESCE.",
+    "example": "-- Заявки с менеджером и аналитиком\nSELECT\n  sa.id,\n  sa.create_date,\n  sa.lim_sum,\n  c.name                                                      AS company_name,\n  ss.name                                                     AS state_name,\n  mgr.sur_name || ' ' || COALESCE(mgr.first_name, '')        AS manager_name,\n  anl.sur_name || ' ' || COALESCE(anl.first_name, '')        AS analyst_name\nFROM scp_application sa\nINNER JOIN sys_state    ss  ON ss.id  = sa.afp_state_id\nINNER JOIN sys_company  c   ON c.id   = sa.org_id\nLEFT  JOIN sys_employee mgr ON mgr.id = sa.emp_id\nLEFT  JOIN scp_project_ans spa ON spa.req_link_id = sa.id AND spa.status = 1\nLEFT  JOIN sys_employee anl ON anl.id = spa.credit_analyst_id\nWHERE sa.status = 1\n  AND sa.create_date >= $1\nORDER BY sa.create_date DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "scp_app_segment_breakdown",
+    "pattern_type": "СКП. Заявки по бизнес-сегменту",
+    "description": "Разбивка заявок по сегменту бизнеса клиента",
+    "use_case": "Корпоративные vs МСБ заявки, статистика по сегментам",
+    "text": "Бизнес-сегмент в scp_application через scp_business_segment → business_segment.id. Таблица business_segment содержит: id, name, ident, type_int_code. Группировка по сегментам даёт разбивку портфеля. COALESCE для случаев когда сегмент не заполнен. Совместно с COUNT и SUM lim_sum для аналитики.",
+    "example": "-- Разбивка заявок по бизнес-сегменту\nSELECT\n  COALESCE(bs.name, 'Не указан')  AS segment_name,\n  COUNT(sa.id)                     AS app_count,\n  SUM(sa.lim_sum)                  AS total_limit,\n  AVG(sa.lim_sum)                  AS avg_limit\nFROM scp_application sa\nLEFT JOIN business_segment bs ON bs.id = sa.scp_business_segment\nWHERE sa.status = 1\n  AND sa.create_date >= $1\n  AND COALESCE(sa.is_test, 0) = 0\nGROUP BY bs.id, bs.name\nORDER BY app_count DESC\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "scp_app_overdue",
+    "pattern_type": "СКП. Просроченные / долго висящие заявки",
+    "description": "Поиск заявок, находящихся в текущем состоянии дольше заданного числа дней",
+    "use_case": "Заявки без движения больше 30 дней, просроченные заявки",
+    "text": "Поиск застрявших заявок в scp_application. Нет поля 'дата смены статуса' — используем last_modified_date как приближение. Для точного трекинга нужен анализ журнала изменений. EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - last_modified_date)) / 86400 даёт дни без изменений. Фильтр по активным состояниям: исключать финальные (одобрено/отказано/закрыто). Добавлять ORDER BY last_modified_date ASC чтобы видеть самые старые первыми.",
+    "example": "-- Заявки без изменений более N дней\nSELECT\n  sa.id,\n  sa.create_date,\n  sa.last_modified_date,\n  EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - sa.last_modified_date)) / 86400\n                            AS days_no_change,\n  c.name                    AS company_name,\n  ss.name                   AS state_name,\n  e.sur_name || ' ' || COALESCE(e.first_name, '') AS manager\nFROM scp_application sa\nINNER JOIN sys_state    ss ON ss.id = sa.afp_state_id\nINNER JOIN sys_company  c  ON c.id  = sa.org_id\nLEFT  JOIN sys_employee e  ON e.id  = sa.emp_id\nWHERE sa.status = 1\n  AND COALESCE(sa.is_test, 0) = 0\n  AND sa.last_modified_date < CURRENT_TIMESTAMP - INTERVAL '30 days'\nORDER BY sa.last_modified_date ASC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "scp_app_risk_zone",
+    "pattern_type": "СКП. Заявки по зоне риска",
+    "description": "Фильтрация и группировка заявок по зоне риска клиента",
+    "use_case": "Заявки из красной зоны риска, статистика по зонам риска",
+    "text": "Зона риска в scp_application: risk_zone_id — числовое поле. Поле is_not_red_zone (smallint) — флаг 'не красная зона'. calc_risk_date — дата расчёта риска. Для расшифровки зоны риска может потребоваться JOIN с справочным объектом. COALESCE(sa.is_not_red_zone, 0) = 0 для фильтра заявок потенциально красной зоны. Поле is_not_red_zona_bool — булев аналог.",
+    "example": "-- Заявки с признаком красной зоны риска\nSELECT\n  sa.id,\n  sa.create_date,\n  sa.lim_sum,\n  sa.risk_zone_id,\n  sa.calc_risk_date,\n  c.name          AS company_name,\n  ss.name         AS state_name\nFROM scp_application sa\nINNER JOIN sys_state   ss ON ss.id = sa.afp_state_id\nINNER JOIN sys_company c  ON c.id  = sa.org_id\nWHERE sa.status = 1\n  AND COALESCE(sa.is_not_red_zone, 0) = 0\n  AND sa.risk_zone_id IS NOT NULL\n  AND COALESCE(sa.is_test, 0) = 0\nORDER BY sa.create_date DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "scp_app_search_by_number",
+    "pattern_type": "СКП. Поиск заявки по номеру документа",
+    "description": "Поиск заявки по номеру AFl-документа или GSL",
+    "use_case": "Найти заявку по номеру, поиск по afl_doc_num",
+    "text": "Поиск заявок по номеру в scp_application. Поле afl_doc_num — номер AFL-документа (строка). Поле gsl_title — заголовок GSL. Для поиска по частичному совпадению: ILIKE '%' || $1 || '%'. Для точного поиска: = $1. Индексы могут быть на afl_doc_num — точный поиск быстрее. Также можно искать по id напрямую если известен числовой идентификатор.",
+    "example": "-- Поиск заявки по номеру AFL-документа\nSELECT\n  sa.id,\n  sa.afl_doc_num,\n  sa.create_date,\n  sa.lim_sum,\n  c.name   AS company_name,\n  ss.name  AS state_name\nFROM scp_application sa\nINNER JOIN sys_state   ss ON ss.id = sa.afp_state_id\nINNER JOIN sys_company c  ON c.id  = sa.org_id\nWHERE sa.afl_doc_num ILIKE '%' || $1 || '%'\n  AND sa.status = 1\nORDER BY sa.create_date DESC\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "scp_app_without_pledge",
+    "pattern_type": "СКП. Беззалоговые заявки",
+    "description": "Выборка заявок без обеспечения (залога)",
+    "use_case": "Бланковые кредиты, заявки без залога, беззалоговое кредитование",
+    "text": "Флаг отсутствия залога в scp_application: is_without_pledge (smallint, 1 = без залога). Бланковый кредит: is_blanc_credit в scp_project_ans. Поле is_main_owner — флаг основного владельца. Беззалоговые заявки — повышенный риск, часто требуют отдельной аналитики по сумме и сегменту.",
+    "example": "-- Беззалоговые заявки с суммой лимита\nSELECT\n  sa.id,\n  sa.create_date,\n  sa.lim_sum,\n  c.name          AS company_name,\n  bs.name         AS segment_name,\n  ss.name         AS state_name\nFROM scp_application sa\nINNER JOIN sys_state    ss ON ss.id = sa.afp_state_id\nINNER JOIN sys_company  c  ON c.id  = sa.org_id\nLEFT  JOIN business_segment bs ON bs.id = sa.scp_business_segment\nWHERE sa.is_without_pledge = 1\n  AND sa.status = 1\n  AND COALESCE(sa.is_test, 0) = 0\nORDER BY sa.lim_sum DESC NULLS LAST\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "scp_app_full_detail",
+    "pattern_type": "СКП. Полная карточка заявки",
+    "description": "Детальная выборка всех ключевых полей одной заявки по id",
+    "use_case": "Открыть карточку заявки, показать все данные по заявке",
+    "text": "Полная информация по заявке из scp_application. Один id → все связанные данные. JOIN с sys_company (клиент), sys_state (состояние), sys_employee (менеджер, куратор), business_segment, scp_project_ans (проект решения с суммой и аналитиком). Поле loan_terms — срок кредита. lim_sum — запрошенный лимит. lim_currency_id — валюта. Для единственной записи ORDER BY не обязателен, но LIMIT 1 всё равно нужен.",
+    "example": "-- Полная карточка заявки по id\nSELECT\n  sa.id,\n  sa.afl_doc_num,\n  sa.create_date,\n  sa.last_modified_date,\n  sa.lim_sum,\n  sa.loan_terms,\n  sa.is_without_pledge,\n  sa.is_test,\n  c.name                                                AS company_name,\n  c.inn                                                 AS company_inn,\n  ss.name                                               AS state_name,\n  bs.name                                               AS segment_name,\n  mgr.sur_name || ' ' || COALESCE(mgr.first_name, '')  AS manager_name,\n  cur.sur_name || ' ' || COALESCE(cur.first_name, '')  AS curator_name,\n  spa.credit_analyst_id,\n  anl.sur_name || ' ' || COALESCE(anl.first_name, '')  AS analyst_name,\n  spa.exp_limit_credit_rub\nFROM scp_application sa\nINNER JOIN sys_company    c   ON c.id   = sa.org_id\nINNER JOIN sys_state      ss  ON ss.id  = sa.afp_state_id\nLEFT  JOIN business_segment bs ON bs.id = sa.scp_business_segment\nLEFT  JOIN sys_employee   mgr ON mgr.id = sa.emp_id\nLEFT  JOIN sys_employee   cur ON cur.id = sa.curator_head_id\nLEFT  JOIN scp_project_ans spa ON spa.req_link_id = sa.id AND spa.status = 1\nLEFT  JOIN sys_employee   anl ON anl.id = spa.credit_analyst_id\nWHERE sa.id = $1\nLIMIT 1;"
+  },
+  {
+    "pattern_id": "spa_analyst_workload",
+    "pattern_type": "СКП. Нагрузка аналитиков (scp_project_ans)",
+    "description": "Количество активных проектов решения на каждого кредитного аналитика",
+    "use_case": "Нагрузка аналитика, распределение заявок, загруженность команды",
+    "text": "Нагрузка аналитиков через scp_project_ans. Поле credit_analyst_id → sys_employee.id. req_link_id → application_obj.id (связь с заявкой). state_id → sys_state.id — текущее состояние проекта решения. Для активных проектов: status = 1. GROUP BY credit_analyst_id с COUNT. LEFT JOIN с sys_employee для ФИО. Исключать null-аналитиков (COALESCE или WHERE credit_analyst_id IS NOT NULL).",
+    "example": "-- Нагрузка на кредитных аналитиков\nSELECT\n  e.id                                                   AS analyst_id,\n  e.sur_name || ' ' || COALESCE(e.first_name, '')       AS analyst_name,\n  c.name                                                  AS department,\n  COUNT(spa.id)                                           AS active_projects,\n  SUM(spa.exp_limit_credit_rub)                           AS total_limit_rub\nFROM scp_project_ans spa\nINNER JOIN sys_employee e ON e.id = spa.credit_analyst_id\nINNER JOIN sys_company  c ON c.id = e.org_id\nWHERE spa.status = 1\n  AND spa.credit_analyst_id IS NOT NULL\nGROUP BY e.id, e.sur_name, e.first_name, c.name\nORDER BY active_projects DESC\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "spa_decision_summary",
+    "pattern_type": "СКП. Сводка проектов решений по статусам",
+    "description": "Агрегация проектов решения по состоянию с суммами лимитов",
+    "use_case": "Портфель на рассмотрении, одобренные суммы, статистика решений",
+    "text": "Агрегация scp_project_ans. Ключевые поля: exp_limit_credit_rub — рекомендованный лимит (руб), amount_rub — сумма сделки, state_id и scp_state_id → sys_state.id. loan_type_id → type_loan.id — тип кредита. credit_line_term — срок кредитной линии. tranche_term — срок транша. Группировать по состоянию и типу кредита. SUM(exp_limit_credit_rub) для общего объёма портфеля.",
+    "example": "-- Сводка проектов решений по типу кредита и состоянию\nSELECT\n  tl.name                          AS loan_type,\n  ss.name                          AS state_name,\n  COUNT(spa.id)                    AS project_count,\n  SUM(spa.exp_limit_credit_rub)    AS total_limit_rub,\n  AVG(spa.exp_limit_credit_rub)    AS avg_limit_rub\nFROM scp_project_ans spa\nINNER JOIN sys_state ss ON ss.id = spa.state_id\nLEFT  JOIN type_loan tl ON tl.id = spa.loan_type_id\nWHERE spa.status = 1\nGROUP BY tl.id, tl.name, ss.id, ss.name\nORDER BY total_limit_rub DESC NULLS LAST\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "spa_by_application",
+    "pattern_type": "СКП. Проект решения по заявке",
+    "description": "Получение проекта решения и его параметров для конкретной заявки",
+    "use_case": "Параметры решения по заявке, одобренная сумма, условия кредита",
+    "text": "Связь scp_project_ans с заявкой через req_link_id → application_obj.id. Одна заявка может иметь несколько версий проекта решения — брать актуальный через ROW_NUMBER или MAX(create_date). Ключевые параметры: exp_limit_credit_rub (рекомендованный лимит), amount_rub (сумма), credit_line_term (срок), repayment_type_id, is_blanc_credit (бланковый). Аналитик: credit_analyst_id → sys_employee.id.",
+    "example": "-- Актуальный проект решения по заявке\nSELECT\n  spa.id                     AS project_id,\n  spa.create_date,\n  spa.exp_limit_credit_rub,\n  spa.amount_rub,\n  spa.credit_line_term,\n  spa.is_blanc_credit,\n  tl.name                    AS loan_type,\n  ss.name                    AS state_name,\n  e.sur_name || ' ' || COALESCE(e.first_name, '') AS analyst\nFROM scp_project_ans spa\nINNER JOIN sys_state    ss ON ss.id = spa.state_id\nLEFT  JOIN type_loan    tl ON tl.id = spa.loan_type_id\nLEFT  JOIN sys_employee e  ON e.id  = spa.credit_analyst_id\nWHERE spa.req_link_id = $1\n  AND spa.status = 1\nORDER BY spa.create_date DESC\nLIMIT 1;"
+  },
+  {
+    "pattern_id": "spa_sublimit_borrowers",
+    "pattern_type": "СКП. Сублимиты и заёмщики проекта решения",
+    "description": "Выборка данных о сублимитном заёмщике из проекта решения",
+    "use_case": "Данные заёмщика, сублимиты по проектам решений, связь с компанией-заёмщиком",
+    "text": "Заёмщик в scp_project_ans через scp_subl_bor → sys_company.id. Поле scp_sublimit_sum (в scp_decision_quest) — сумма сублимита. curret_limit_gsl / new_limit_gsl — текущий и новый лимит GSL. current_limit_borow / new_limit_borow — лимиты заёмщика. Для получения участников сделки нужен JOIN с participant_app через app_obj_id.",
+    "example": "-- Проекты решений с данными заёмщика\nSELECT\n  spa.id                        AS project_id,\n  spa.exp_limit_credit_rub,\n  spa.new_limit_gsl,\n  spa.new_limit_borow,\n  borrower.name                 AS borrower_name,\n  borrower.inn                  AS borrower_inn,\n  tl.name                       AS loan_type,\n  ss.name                       AS state\nFROM scp_project_ans spa\nINNER JOIN sys_state   ss       ON ss.id       = spa.state_id\nLEFT  JOIN sys_company borrower ON borrower.id = spa.scp_subl_bor\nLEFT  JOIN type_loan   tl       ON tl.id       = spa.loan_type_id\nWHERE spa.status = 1\n  AND spa.scp_subl_bor IS NOT NULL\nORDER BY spa.create_date DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "spa_voting_members",
+    "pattern_type": "СКП. Участники голосования в проекте решения",
+    "description": "Выборка членов голосования (КМ, ФМ, РМ) по проекту решения",
+    "use_case": "Кто голосовал по заявке, состав комитета, участники принятия решения",
+    "text": "Голосующие в scp_project_ans: voting_km_id (коммерческий менеджер), voting_fm_id (финансовый менеджер), voting_rm_id (риск-менеджер) — все → sys_employee.id. resp_head_cm_id — руководитель CM. scp_chief_ca_id — главный кредитный аналитик. Все поля nullable — использовать LEFT JOIN и COALESCE. Для полной картины голосования нужно собрать всех участников.",
+    "example": "-- Участники принятия решения по проекту\nSELECT\n  spa.id                                                         AS project_id,\n  spa.exp_limit_credit_rub,\n  km.sur_name || ' ' || COALESCE(km.first_name, '')             AS km_name,\n  fm.sur_name || ' ' || COALESCE(fm.first_name, '')             AS fm_name,\n  rm.sur_name || ' ' || COALESCE(rm.first_name, '')             AS rm_name,\n  ca.sur_name || ' ' || COALESCE(ca.first_name, '')             AS chief_analyst,\n  ss.name                                                        AS state\nFROM scp_project_ans spa\nINNER JOIN sys_state    ss ON ss.id  = spa.state_id\nLEFT  JOIN sys_employee km ON km.id  = spa.voting_km_id\nLEFT  JOIN sys_employee fm ON fm.id  = spa.voting_fm_id\nLEFT  JOIN sys_employee rm ON rm.id  = spa.voting_rm_id\nLEFT  JOIN sys_employee ca ON ca.id  = spa.scp_chief_ca_id\nWHERE spa.req_link_id = $1\n  AND spa.status = 1\nLIMIT 5;"
+  },
+  {
+    "pattern_id": "cc_active_contracts",
+    "pattern_type": "Кредитные договоры. Активные договоры",
+    "description": "Список действующих кредитных договоров с данными заёмщика",
+    "use_case": "Действующие кредиты компании, активный кредитный портфель",
+    "text": "Активные кредитные договоры в credit_contract. Активный договор: status = 1 AND is_closed = 0 (или IS NULL). Поле credit_start_date — дата выдачи, credit_end_date — дата погашения. link_customer_id → sys_company.id — заёмщик. afp_state_id → sys_state.id — состояние договора. credit_amount — сумма кредита. credit_contract_number — номер договора (SENSITIVE — включать только при необходимости). cred_interest_rate — процентная ставка.",
+    "example": "-- Активные кредитные договоры по компании\nSELECT\n  cc.id,\n  cc.credit_contract_number,\n  cc.credit_amount,\n  cc.cred_interest_rate,\n  cc.credit_start_date,\n  cc.credit_end_date,\n  cc.days_delay_number,\n  ss.name              AS state_name\nFROM credit_contract cc\nINNER JOIN sys_state ss ON ss.id = cc.afp_state_id\nWHERE cc.link_customer_id = $1\n  AND cc.status  = 1\n  AND COALESCE(cc.is_closed, 0) = 0\nORDER BY cc.credit_end_date\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "cc_expiring_soon",
+    "pattern_type": "Кредитные договоры. Истекающие договоры",
+    "description": "Договоры с датой окончания в ближайшие N дней",
+    "use_case": "Договоры на пролонгацию, истекающие кредиты, плановое погашение",
+    "text": "Договоры с приближающейся датой окончания в credit_contract. credit_end_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL 'N days'. Сортировать по credit_end_date ASC — ближайшие к истечению первыми. Включать link_customer_id → sys_company.id для идентификации заёмщика. Поле days_delay_number — дни просрочки (если > 0 — договор просрочен). loan_classified — признак классификации кредита.",
+    "example": "-- Договоры, истекающие в ближайшие 60 дней\nSELECT\n  cc.id,\n  cc.credit_contract_number,\n  cc.credit_amount,\n  cc.credit_end_date,\n  cc.days_delay_number,\n  c.name               AS company_name,\n  c.inn,\n  ss.name              AS state_name,\n  (cc.credit_end_date::date - CURRENT_DATE) AS days_to_expire\nFROM credit_contract cc\nINNER JOIN sys_company c  ON c.id  = cc.link_customer_id\nINNER JOIN sys_state   ss ON ss.id = cc.afp_state_id\nWHERE cc.status = 1\n  AND COALESCE(cc.is_closed, 0) = 0\n  AND cc.credit_end_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '60 days'\nORDER BY cc.credit_end_date\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "cc_overdue_contracts",
+    "pattern_type": "Кредитные договоры. Просроченные договоры",
+    "description": "Кредитные договоры с просрочкой платежей",
+    "use_case": "Просроченные кредиты, дни просрочки, проблемный портфель",
+    "text": "Просроченные договоры в credit_contract. Основной признак: days_delay_number > 0. Поле loan_classified — признак классификации проблемного кредита. quality_categor — категория качества ссуды. financial_position — финансовое положение. reserve_size — размер резерва. Для портфельного анализа: группировать по quality_categor и считать SUM(credit_amount).",
+    "example": "-- Просроченные кредитные договоры\nSELECT\n  cc.id,\n  cc.credit_amount,\n  cc.credit_end_date,\n  cc.days_delay_number,\n  cc.quality_categor,\n  cc.reserve_size,\n  c.name               AS company_name,\n  c.inn,\n  ss.name              AS state_name\nFROM credit_contract cc\nINNER JOIN sys_company c  ON c.id  = cc.link_customer_id\nINNER JOIN sys_state   ss ON ss.id = cc.afp_state_id\nWHERE cc.status = 1\n  AND cc.days_delay_number > 0\nORDER BY cc.days_delay_number DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "cc_portfolio_summary",
+    "pattern_type": "Кредитные договоры. Портфельная аналитика",
+    "description": "Сводка по кредитному портфелю: объём, количество, разбивка по качеству",
+    "use_case": "Объём кредитного портфеля, средняя ставка, разбивка по категориям качества",
+    "text": "Портфельный анализ credit_contract. Группировать по quality_categor (категория качества), financial_position. SUM(credit_amount) — общий объём портфеля. AVG(cred_interest_rate) — средняя ставка. COUNT(*) FILTER (WHERE days_delay_number > 0) — просроченные. Для временного анализа: группировать по DATE_TRUNC('month', credit_start_date). Исключать закрытые: COALESCE(is_closed, 0) = 0.",
+    "example": "-- Портфельная сводка по категориям качества\nSELECT\n  COALESCE(cc.quality_categor::text, 'Не указана')   AS quality_category,\n  COUNT(cc.id)                                         AS contract_count,\n  SUM(cc.credit_amount)                                AS total_amount,\n  AVG(cc.cred_interest_rate)                           AS avg_rate,\n  COUNT(*) FILTER (WHERE cc.days_delay_number > 0)    AS overdue_count,\n  SUM(cc.reserve_size)                                 AS total_reserve\nFROM credit_contract cc\nWHERE cc.status = 1\n  AND COALESCE(cc.is_closed, 0) = 0\nGROUP BY cc.quality_categor\nORDER BY total_amount DESC NULLS LAST\nLIMIT 20;"
+  },
+  {
+    "pattern_id": "cc_linked_to_application",
+    "pattern_type": "Кредитные договоры. Связь с заявкой",
+    "description": "Получение кредитного договора по исходной заявке и наоборот",
+    "use_case": "Договор выданный по заявке, заявка по номеру договора, цепочка заявка → договор",
+    "text": "Связь credit_contract с заявкой через поле aplication_id → (application_obj или scp_application, зависит от типа). Поле link_customer_id → sys_company.id — заёмщик. Поле applic_ko_kbkp_id — ссылка на КО/КБКП заявку. appl_documentum_num — номер заявки в Documentum. Для поиска всех договоров по компании: WHERE link_customer_id = $1. sys_employee_id → sys_employee.id — ответственный сотрудник.",
+    "example": "-- Договоры выданные по конкретной заявке\nSELECT\n  cc.id,\n  cc.credit_contract_number,\n  cc.credit_amount,\n  cc.credit_start_date,\n  cc.credit_end_date,\n  cc.cred_interest_rate,\n  c.name               AS company_name,\n  ss.name              AS state_name,\n  e.sur_name || ' ' || COALESCE(e.first_name, '') AS responsible\nFROM credit_contract cc\nINNER JOIN sys_company  c  ON c.id  = cc.link_customer_id\nINNER JOIN sys_state    ss ON ss.id = cc.afp_state_id\nLEFT  JOIN sys_employee e  ON e.id  = cc.sys_employee_id\nWHERE cc.aplication_id = $1\n  AND cc.status = 1\nORDER BY cc.credit_start_date DESC\nLIMIT 10;"
+  },
+  {
+    "pattern_id": "emp_search_by_name",
+    "pattern_type": "Сотрудники. Поиск по ФИО",
+    "description": "Поиск сотрудника по фамилии, имени или отчеству",
+    "use_case": "Найти сотрудника по фамилии, поиск по части имени",
+    "text": "Поиск сотрудников в sys_employee по ФИО. Поля: sur_name (фамилия), first_name (имя), second_name (отчество). SENSITIVE поля: email, phone, inner_emp_phone, birthday — не включать без необходимости. Активные сотрудники: status = 1. Для поиска по ФИО: ILIKE '%' || $1 || '%' по sur_name. Поле pers_emp_number — табельный номер. Конкатенация ФИО: sur_name || ' ' || COALESCE(first_name, '') || ' ' || COALESCE(second_name, '').",
+    "example": "-- Поиск сотрудника по фамилии\nSELECT\n  e.id,\n  e.sur_name,\n  e.first_name,\n  e.second_name,\n  e.pers_emp_number,\n  c.name            AS department\nFROM sys_employee e\nINNER JOIN sys_company c ON c.id = e.org_id\nWHERE e.sur_name ILIKE '%' || $1 || '%'\n  AND e.status = 1\nORDER BY e.sur_name, e.first_name\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "emp_by_department",
+    "pattern_type": "Сотрудники. Список по подразделению",
+    "description": "Все активные сотрудники конкретного подразделения",
+    "use_case": "Список сотрудников отдела, состав команды, штат подразделения",
+    "text": "Сотрудники подразделения через sys_employee.org_id → sys_company.id. Поле emp_org_id — офис сотрудника (может отличаться от org_id). Активные: status = 1. Поле is_locked = 1 — заблокированные (исключать для актуального состава). Поле job_pos_id — должность. Сортировать по sur_name для удобства. NEVER включать email/phone без явной необходимости — SENSITIVE.",
+    "example": "-- Активные сотрудники подразделения\nSELECT\n  e.id,\n  e.sur_name,\n  e.first_name,\n  e.second_name,\n  e.pers_emp_number\nFROM sys_employee e\nWHERE e.org_id = $1\n  AND e.status = 1\n  AND COALESCE(e.is_locked, 0) = 0\nORDER BY e.sur_name, e.first_name\nLIMIT $2 OFFSET $3;"
+  },
+  {
+    "pattern_id": "emp_with_open_apps",
+    "pattern_type": "Сотрудники. Аналитики с активными заявками",
+    "description": "Список аналитиков и количество назначенных на них активных заявок",
+    "use_case": "Загруженность аналитиков, распределение нагрузки, незакрытые заявки по аналитику",
+    "text": "Нагрузка аналитиков: JOIN sys_employee с scp_project_ans через credit_analyst_id. Считать только активные проекты решений (status = 1). LEFT JOIN чтобы включить аналитиков без заявок (count = 0). Группировать по e.id. Включать подразделение через JOIN с sys_company. Поле org_id у сотрудника — его подразделение.",
+    "example": "-- Аналитики с количеством активных проектов решений\nSELECT\n  e.id,\n  e.sur_name || ' ' || COALESCE(e.first_name, '')  AS analyst_name,\n  c.name                                             AS department,\n  COUNT(spa.id)                                      AS open_projects,\n  SUM(spa.exp_limit_credit_rub)                      AS total_limit_rub\nFROM sys_employee e\nINNER JOIN sys_company c    ON c.id   = e.org_id\nLEFT  JOIN scp_project_ans spa\n  ON spa.credit_analyst_id = e.id AND spa.status = 1\nWHERE e.status = 1\n  AND e.org_id = $1\nGROUP BY e.id, e.sur_name, e.first_name, c.name\nORDER BY open_projects DESC\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "emp_responsible_objects",
+    "pattern_type": "Сотрудники. Ответственные за объекты",
+    "description": "Объекты, за которые отвечает сотрудник, через sys_obj_resp",
+    "use_case": "За какие заявки отвечает сотрудник, список объектов сотрудника",
+    "text": "Ответственность сотрудников через sys_obj_resp. Поля: afe_emp_id → sys_employee.id (сотрудник), afe_obj_id → sys_object.id (объект). afe_short_name — краткое название роли. afe_resp_comment — комментарий. Для получения конкретного типа объектов нужен дополнительный JOIN. Активные записи: status = 1.",
+    "example": "-- Объекты ответственности сотрудника\nSELECT\n  sor.id,\n  sor.afe_short_name,\n  sor.afe_resp_comment,\n  sor.create_date\nFROM sys_obj_resp sor\nWHERE sor.afe_emp_id = $1\n  AND sor.status = 1\nORDER BY sor.create_date DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "emp_count_by_dept",
+    "pattern_type": "Сотрудники. Статистика по подразделениям",
+    "description": "Количество сотрудников в каждом подразделении",
+    "use_case": "Штатная численность, распределение персонала по отделам",
+    "text": "Численность по подразделениям: GROUP BY org_id с JOIN на sys_company. Активные сотрудники: status = 1 AND is_locked != 1. HAVING для фильтрации мелких подразделений. ORDER BY count DESC для ранжирования. Поле is_system = 1 — системные записи, исключать.",
+    "example": "-- Численность сотрудников по подразделениям\nSELECT\n  c.id,\n  c.name            AS department_name,\n  c.short_name,\n  COUNT(e.id)        AS employee_count\nFROM sys_company c\nLEFT JOIN sys_employee e\n  ON e.org_id = c.id\n  AND e.status = 1\n  AND COALESCE(e.is_locked, 0) = 0\n  AND COALESCE(e.is_system, 0) = 0\nWHERE c.status = 1\nGROUP BY c.id, c.name, c.short_name\nHAVING COUNT(e.id) > 0\nORDER BY employee_count DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "emp_tabnum_lookup",
+    "pattern_type": "Сотрудники. Поиск по табельному номеру",
+    "description": "Найти сотрудника по табельному номеру",
+    "use_case": "Поиск по табельному номеру, идентификация сотрудника",
+    "text": "Табельный номер в sys_employee: pers_emp_number (character varying). Поиск точным совпадением: WHERE pers_emp_number = $1. Поиск по части: WHERE pers_emp_number ILIKE '%' || $1 || '%'. Табельный номер уникален в пределах организации. Для кредитных договоров также есть поле tabnum в credit_contract.",
+    "example": "-- Найти сотрудника по табельному номеру\nSELECT\n  e.id,\n  e.sur_name,\n  e.first_name,\n  e.second_name,\n  e.pers_emp_number,\n  c.name   AS department\nFROM sys_employee e\nINNER JOIN sys_company c ON c.id = e.org_id\nWHERE e.pers_emp_number = $1\n  AND e.status = 1\nLIMIT 1;"
+  },
+  {
+    "pattern_id": "emp_office_location",
+    "pattern_type": "Сотрудники. Офис и местонахождение",
+    "description": "Сотрудники с привязкой к офису ПСБ",
+    "use_case": "Сотрудники офиса, расположение сотрудника, список по офису",
+    "text": "Офис сотрудника в sys_employee через ps_office → offices_psb.id. Таблица offices_psb содержит: name, short_name, parent_org_id (иерархия офисов), org_company → sys_company.id. Поле emp_org_id — организация сотрудника (может отличаться от org_id подразделения). Для выборки всех сотрудников офиса: JOIN через ps_office.",
+    "example": "-- Сотрудники конкретного офиса ПСБ\nSELECT\n  e.id,\n  e.sur_name,\n  e.first_name,\n  e.second_name,\n  e.pers_emp_number,\n  o.name    AS office_name\nFROM sys_employee e\nINNER JOIN offices_psb o ON o.id = e.ps_office\nWHERE o.id = $1\n  AND e.status = 1\n  AND COALESCE(e.is_locked, 0) = 0\nORDER BY e.sur_name\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "emp_new_hires",
+    "pattern_type": "Сотрудники. Новые сотрудники за период",
+    "description": "Сотрудники, добавленные в систему за последний период",
+    "use_case": "Новые сотрудники за месяц, недавно принятые на работу",
+    "text": "Новые сотрудники по дате создания записи в sys_employee: create_date. Не путать с датой трудоустройства — create_date это дата добавления в систему. Фильтр по периоду: create_date >= CURRENT_DATE - INTERVAL '30 days'. Активные: status = 1. Сортировать по create_date DESC для отображения самых новых первыми.",
+    "example": "-- Новые сотрудники за последние 30 дней\nSELECT\n  e.id,\n  e.sur_name,\n  e.first_name,\n  e.second_name,\n  e.pers_emp_number,\n  e.create_date,\n  c.name   AS department\nFROM sys_employee e\nINNER JOIN sys_company c ON c.id = e.org_id\nWHERE e.create_date >= CURRENT_DATE - INTERVAL '30 days'\n  AND e.status = 1\nORDER BY e.create_date DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "company_search",
+    "pattern_type": "Компании. Поиск по названию или ИНН",
+    "description": "Поиск компании по названию (полному или краткому) или ИНН",
+    "use_case": "Найти компанию по ИНН, поиск контрагента по имени",
+    "text": "Поиск компаний в sys_company. Поля для поиска: name (полное название), short_name (краткое), inn (ИНН, строка). ИНН — точный поиск: WHERE inn = $1. Название — ILIKE: WHERE name ILIKE '%' || $1 || '%'. SENSITIVE поля: attr_email, contact_phone, inn — включать только при необходимости. Активные компании: status = 1. Поле is_system = 1 — системные записи, исключать.",
+    "example": "-- Поиск компании по ИНН или названию\nSELECT\n  c.id,\n  c.name,\n  c.short_name,\n  c.inn,\n  bs.name      AS segment_name,\n  c.status\nFROM sys_company c\nLEFT JOIN business_segment bs ON bs.id = c.busines_segment_id\nWHERE (\n  c.inn = $1\n  OR c.name ILIKE '%' || $1 || '%'\n  OR c.short_name ILIKE '%' || $1 || '%'\n)\n  AND c.status = 1\n  AND COALESCE(c.is_system, 0) = 0\nORDER BY c.name\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "company_with_contracts",
+    "pattern_type": "Компании. Компании с кредитными договорами",
+    "description": "Список компаний у которых есть действующие кредитные договоры",
+    "use_case": "Заёмщики банка, компании с активными кредитами",
+    "text": "Компании с договорами: JOIN sys_company с credit_contract через link_customer_id. Для фильтра по активным: EXISTS или INNER JOIN с WHERE cc.status = 1 AND is_closed = 0. Группировать по company для агрегации: COUNT(cc.id) — количество договоров, SUM(cc.credit_amount) — общая задолженность. Поле sign_of_sme — признак МСБ (малый/средний бизнес).",
+    "example": "-- Компании с активными кредитными договорами\nSELECT\n  c.id,\n  c.name,\n  c.short_name,\n  c.inn,\n  bs.name           AS segment,\n  COUNT(cc.id)       AS contract_count,\n  SUM(cc.credit_amount) AS total_debt\nFROM sys_company c\nINNER JOIN credit_contract cc\n  ON cc.link_customer_id = c.id\n  AND cc.status = 1\n  AND COALESCE(cc.is_closed, 0) = 0\nLEFT  JOIN business_segment bs ON bs.id = c.busines_segment_id\nWHERE c.status = 1\nGROUP BY c.id, c.name, c.short_name, c.inn, bs.name\nORDER BY total_debt DESC NULLS LAST\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "company_by_segment",
+    "pattern_type": "Компании. Список по бизнес-сегменту",
+    "description": "Выборка компаний определённого бизнес-сегмента",
+    "use_case": "Все МСБ-клиенты, корпоративные клиенты по сегменту",
+    "text": "Сегмент компании в sys_company: busines_segment_id → business_segment.id. Поле sign_of_sme — признак МСБ (smallint). Поле business_segment — устаревшее поле, использовать busines_segment_id. Поле customer_type_id — тип клиента. Для поиска по названию сегмента: JOIN с business_segment WHERE bs.name ILIKE $1 или bs.ident = $1.",
+    "example": "-- Компании конкретного бизнес-сегмента\nSELECT\n  c.id,\n  c.name,\n  c.short_name,\n  c.inn,\n  c.sign_of_sme,\n  c.comp_reg_date\nFROM sys_company c\nINNER JOIN business_segment bs ON bs.id = c.busines_segment_id\nWHERE bs.name ILIKE '%' || $1 || '%'\n  AND c.status = 1\n  AND COALESCE(c.is_system, 0) = 0\nORDER BY c.name\nLIMIT $2 OFFSET $3;"
+  },
+  {
+    "pattern_id": "company_group_hierarchy",
+    "pattern_type": "Компании. Группа компаний",
+    "description": "Все компании входящие в одну группу через group_company_link",
+    "use_case": "Компании одной группы, дочерние структуры, холдинг",
+    "text": "Группа компаний в sys_company через group_company_link → sys_company.id (ссылка на головную компанию группы). Для получения всех членов группы: WHERE group_company_link = $1 OR id = $1. Для рекурсивного обхода (дочерние → внучатые): WITH RECURSIVE. Поле parent_id в sys_company (если есть) — прямая иерархия. Совместно с кредитными данными — общая нагрузка группы.",
+    "example": "-- Все компании группы\nSELECT\n  c.id,\n  c.name,\n  c.short_name,\n  c.inn,\n  CASE WHEN c.id = c.group_company_link THEN 'Головная'\n       ELSE 'Дочерняя' END AS role_in_group\nFROM sys_company c\nWHERE (\n  c.group_company_link = $1\n  OR c.id = $1\n)\n  AND c.status = 1\nORDER BY c.name\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "company_negative_status",
+    "pattern_type": "Компании. Компании с негативным статусом",
+    "description": "Выборка компаний с негативными отметками или признаком банкротства",
+    "use_case": "Проблемные клиенты, компании в банкротстве, негативный статус",
+    "text": "Негативные признаки в sys_company: sign_of_bankruptcy (признак банкротства), stage_of_bankruptcy — стадия банкротства. neg_status — негативный статус. neg_comment — комментарий о негативе. Для фильтра проблемных: WHERE sign_of_bankruptcy = 1 OR neg_status IS NOT NULL. Поле newly_founded — признак новой компании (повышенный риск).",
+    "example": "-- Компании с признаком банкротства или негативным статусом\nSELECT\n  c.id,\n  c.name,\n  c.inn,\n  c.sign_of_bankruptcy,\n  c.stage_of_bankruptcy,\n  c.neg_status,\n  c.neg_comment\nFROM sys_company c\nWHERE (\n  c.sign_of_bankruptcy = 1\n  OR c.neg_status IS NOT NULL\n)\n  AND c.status = 1\nORDER BY c.name\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "company_new_registered",
+    "pattern_type": "Компании. Новые/недавно зарегистрированные компании",
+    "description": "Компании зарегистрированные в заданный период или помеченные как новые",
+    "use_case": "Новые клиенты, недавно зарегистрированные компании, старт-апы",
+    "text": "Дата регистрации компании в sys_company: comp_reg_date (дата госрегистрации), date_of_registration (дата добавления в систему). Поле newly_founded = 1 — признак новообразованной компании. company_record_date — дата записи. Для поиска новых клиентов за период: WHERE date_of_registration BETWEEN $1 AND $2.",
+    "example": "-- Новые компании-клиенты за период\nSELECT\n  c.id,\n  c.name,\n  c.short_name,\n  c.inn,\n  c.date_of_registration,\n  c.comp_reg_date,\n  c.newly_founded,\n  bs.name   AS segment\nFROM sys_company c\nLEFT JOIN business_segment bs ON bs.id = c.busines_segment_id\nWHERE c.date_of_registration BETWEEN $1 AND $2\n  AND c.status = 1\n  AND COALESCE(c.is_system, 0) = 0\nORDER BY c.date_of_registration DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "company_okved_industry",
+    "pattern_type": "Компании. Компании по отраслевому коду (ОКВЭД)",
+    "description": "Поиск и группировка компаний по основному виду деятельности ОКВЭД",
+    "use_case": "Компании определённой отрасли, статистика по ОКВЭД, отраслевой анализ",
+    "text": "Вид деятельности в sys_company: main_okved — основной ОКВЭД (строка), fo_okved — финансовый ОКВЭД. Поиск по коду или названию: ILIKE для частичного совпадения по main_okved. Для полного отраслевого анализа группировать по main_okved с COUNT и SUM кредитных данных. Поле attr_reg_country — страна регистрации.",
+    "example": "-- Компании по ОКВЭД с кредитной нагрузкой\nSELECT\n  c.main_okved,\n  COUNT(DISTINCT c.id)              AS company_count,\n  COUNT(cc.id)                       AS contract_count,\n  SUM(cc.credit_amount)              AS total_credit\nFROM sys_company c\nLEFT JOIN credit_contract cc\n  ON cc.link_customer_id = c.id\n  AND cc.status = 1\n  AND COALESCE(cc.is_closed, 0) = 0\nWHERE c.main_okved ILIKE $1 || '%'\n  AND c.status = 1\n  AND COALESCE(c.is_system, 0) = 0\nGROUP BY c.main_okved\nORDER BY total_credit DESC NULLS LAST\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "participant_by_role",
+    "pattern_type": "Участники сделки. По роли",
+    "description": "Участники заявки с фильтром по типу роли (заёмщик, поручитель, залогодатель)",
+    "use_case": "Заёмщики по заявке, поручители, залогодатели, список участников сделки",
+    "text": "Участники сделки в participant_app. app_obj_id → application_obj.id (заявка). borrower_id → sys_company.id (компания-участник). Роли через флаги: is_borrower (заёмщик), is_guarantor (поручитель), is_pledger (залогодатель), is_director (директор), is_actual_owner (бенефициар), is_founder (учредитель). part_type_id — тип участника. is_current = 1 — текущий актуальный участник.",
+    "example": "-- Все участники конкретной заявки\nSELECT\n  pa.id,\n  c.name               AS participant_name,\n  c.inn,\n  pa.is_borrower,\n  pa.is_guarantor,\n  pa.is_pledger,\n  pa.is_director,\n  pa.is_actual_owner\nFROM participant_app pa\nINNER JOIN sys_company c ON c.id = pa.borrower_id\nWHERE pa.app_obj_id = $1\n  AND pa.status = 1\n  AND pa.is_current = 1\nORDER BY pa.is_borrower DESC, c.name\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "participant_company_deals",
+    "pattern_type": "Участники сделки. Все сделки компании",
+    "description": "Все заявки в которых компания участвует в любой роли",
+    "use_case": "Все сделки где участвует компания, связанные заявки контрагента",
+    "text": "Все заявки с участием компании через participant_app. borrower_id → sys_company.id. Для получения заявок: JOIN с application_obj или scp_application через app_obj_id. Одна компания может участвовать в одной заявке несколько раз (разные роли) — DISTINCT по заявке. Фильтр по роли: is_borrower = 1 для основного заёмщика. is_related_entity — признак связанного лица.",
+    "example": "-- Все заявки с участием компании\nSELECT DISTINCT\n  sa.id                AS application_id,\n  sa.create_date,\n  sa.lim_sum,\n  pa.is_borrower,\n  pa.is_guarantor,\n  ss.name              AS state_name\nFROM participant_app pa\nINNER JOIN application_obj ao ON ao.id  = pa.app_obj_id\nINNER JOIN scp_application sa ON sa.id  = ao.id\nINNER JOIN sys_state        ss ON ss.id = sa.afp_state_id\nWHERE pa.borrower_id = $1\n  AND pa.status = 1\n  AND sa.status = 1\nORDER BY sa.create_date DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "participant_sec_check",
+    "pattern_type": "Участники сделки. Результаты проверки СЭБ",
+    "description": "Статус проверки безопасности для участников заявки",
+    "use_case": "Прошёл ли участник проверку СЭБ, дата проверки, антифрод-статус",
+    "text": "Проверки участников в participant_app. sec_date_check — дата последней проверки СЭБ. sec_appeal_date — дата обращения. is_sec_appeal — признак обращения в СЭБ. is_antifrod_success — признак успешного антифрод-контроля. is_check_need = 1 — требуется проверка. particip_sec_id → scp_part_sec_expertise.id — экспертиза СЭБ. bki_status — статус проверки БКИ.",
+    "example": "-- Участники заявки с результатами проверок\nSELECT\n  c.name               AS participant_name,\n  pa.is_borrower,\n  pa.is_guarantor,\n  pa.sec_date_check,\n  pa.is_sec_appeal,\n  pa.is_antifrod_success,\n  pa.bki_status,\n  pa.is_check_need\nFROM participant_app pa\nINNER JOIN sys_company c ON c.id = pa.borrower_id\nWHERE pa.app_obj_id = $1\n  AND pa.status = 1\n  AND pa.is_current = 1\nORDER BY pa.is_borrower DESC\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "trans_by_account_period",
+    "pattern_type": "Транзакции. Обороты по счёту за период",
+    "description": "Финансовые проводки по конкретному счёту за заданный период",
+    "use_case": "Обороты по счёту, движение средств, анализ транзакций",
+    "text": "Транзакции по счёту в afhd_ac_trans_link. ОБЯЗАТЕЛЬНО фильтровать по account_num_id и account_date — таблица огромная. account_num_id → acc_number.id. after_amount — остаток после операции. before_amount — остаток до. SENSITIVE поля: debit_credit_id — не включать без необходимости. is_intragroup = 1 — внутригрупповые операции (можно исключать). is_excepted = 1 — исключённые операции.",
+    "example": "-- Транзакции по счёту за период\nSELECT\n  t.id,\n  t.account_date,\n  t.after_amount,\n  t.before_amount,\n  t.multiply_val,\n  an.account_name,\n  an.name           AS account_code\nFROM afhd_ac_trans_link t\nINNER JOIN acc_number an ON an.id = t.account_num_id\nWHERE t.account_num_id = $1\n  AND t.account_date BETWEEN $2 AND $3\n  AND COALESCE(t.is_excepted, 0) = 0\nORDER BY t.account_date DESC\nLIMIT 500;"
+  },
+  {
+    "pattern_id": "trans_monthly_aggregation",
+    "pattern_type": "Транзакции. Ежемесячная агрегация",
+    "description": "Суммарные обороты по счёту с разбивкой по месяцам",
+    "use_case": "Ежемесячные обороты, динамика балансов, месячный отчёт по счёту",
+    "text": "Агрегация транзакций по месяцам в afhd_ac_trans_link. DATE_TRUNC('month', account_date) для группировки. SUM(after_amount) / AVG(after_amount) для статистики по остаткам. COUNT(*) для числа операций. Фильтровать по account_num_id — без него запрос слишком тяжёлый. is_intragroup для разделения внутри- и внешнегрупповых операций.",
+    "example": "-- Ежемесячная агрегация оборотов по счёту\nSELECT\n  DATE_TRUNC('month', t.account_date)   AS month,\n  COUNT(t.id)                            AS tx_count,\n  SUM(t.after_amount)                    AS sum_after,\n  AVG(t.after_amount)                    AS avg_balance,\n  MAX(t.after_amount)                    AS max_balance,\n  MIN(t.after_amount)                    AS min_balance\nFROM afhd_ac_trans_link t\nWHERE t.account_num_id = $1\n  AND t.account_date >= $2\n  AND t.account_date <  $3\n  AND COALESCE(t.is_excepted, 0) = 0\nGROUP BY DATE_TRUNC('month', t.account_date)\nORDER BY month\nLIMIT 36;"
+  },
+  {
+    "pattern_id": "acc_number_hierarchy",
+    "pattern_type": "Счета. Иерархия счетов",
+    "description": "Дерево счетов через parent_acc, обход плана счетов",
+    "use_case": "Подсчета и субсчета, план счетов, дочерние счета",
+    "text": "Иерархия счетов в acc_number через parent_acc → acc_number.id. Для обхода: WITH RECURSIVE. Поля: account_name (наименование счёта/субсчёта), name (код), parent_acc. Корневые счета: WHERE parent_acc IS NULL. Глубину ограничивать (depth < 10). org_id — привязка к подразделению.",
+    "example": "-- Дерево счетов начиная с указанного\nWITH RECURSIVE acc_tree AS (\n  SELECT id, name, account_name, parent_acc, 0 AS depth\n  FROM acc_number\n  WHERE id = $1 AND status = 1\n  UNION ALL\n  SELECT a.id, a.name, a.account_name, a.parent_acc, t.depth + 1\n  FROM acc_number a\n  INNER JOIN acc_tree t ON t.id = a.parent_acc\n  WHERE a.status = 1 AND t.depth < 8\n)\nSELECT id, name, account_name, depth, parent_acc\nFROM acc_tree\nORDER BY depth, name\nLIMIT 200;"
+  },
+  {
+    "pattern_id": "count_turnover_by_company",
+    "pattern_type": "ОСВ. Обороты по субконто компании",
+    "description": "Дебетовые и кредитовые обороты по компании через count_turnover",
+    "use_case": "Обороты компании за период, дебет/кредит субконто, сальдо по компании",
+    "text": "Обороты субконто в count_turnover. Поля: link_cnt_owner → sys_company.id (владелец субконто), account_num_id → acc_number.id (счёт), turnover_debit (дебетовый оборот), turnover_credit (кредитовый оборот), input_balance_debit / input_balace_credit (входящее сальдо), output_balance_debit / output_balance_credit (исходящее сальдо). st_period / finish_period — даты периода. Поле double_turn_balance — двойной оборот/сальдо.",
+    "example": "-- Обороты по субконто компании\nSELECT\n  ct.id,\n  ct.st_period,\n  ct.finish_period,\n  ct.turnover_debit,\n  ct.turnover_credit,\n  ct.input_balance_debit,\n  ct.output_balance_debit,\n  an.account_name,\n  an.name             AS account_code\nFROM count_turnover ct\nINNER JOIN acc_number an ON an.id = ct.account_num_id\nWHERE ct.link_cnt_owner = $1\n  AND ct.st_period >= $2\n  AND ct.finish_period <= $3\nORDER BY ct.st_period, an.name\nLIMIT 200;"
+  },
+  {
+    "pattern_id": "guarantee_expiring",
+    "pattern_type": "Гарантии. Истекающие гарантии",
+    "description": "Гарантии клиентов с близкой датой истечения",
+    "use_case": "Гарантии на пролонгацию, истекающие в ближайшие N дней",
+    "text": "Гарантии в yaig_client_guarantee. Дата закрытия: yaig_date_close. Поиск истекающих: yaig_date_close BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL 'N days'. yaig_guar_summ — сумма гарантии. yaig_client_link → sys_company.id — клиент. yaig_product_id → yaig_product_dict.id — продукт. Связь с генеральным соглашением: yaig_prnt_gen_agr_id → yaig_client_gen_agr.id.",
+    "example": "-- Гарантии, истекающие в ближайшие 90 дней\nSELECT\n  g.id,\n  g.yaig_guar_num,\n  g.yaig_guar_summ,\n  g.yaig_date_open,\n  g.yaig_date_close,\n  (g.yaig_date_close::date - CURRENT_DATE) AS days_to_expire,\n  c.name              AS client_name,\n  c.inn,\n  pd.name             AS product_name\nFROM yaig_client_guarantee g\nINNER JOIN sys_company      c  ON c.id  = g.yaig_client_link\nLEFT  JOIN yaig_product_dict pd ON pd.id = g.yaig_product_id\nWHERE g.status = 1\n  AND g.yaig_date_close BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '90 days'\nORDER BY g.yaig_date_close\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "gen_agr_unused_limit",
+    "pattern_type": "Генеральные соглашения. Неиспользованный лимит",
+    "description": "Генеральные соглашения с остатком неиспользованного лимита",
+    "use_case": "Доступный лимит по соглашению, неиспользованный лимит, анализ утилизации",
+    "text": "Генеральные соглашения в yaig_client_gen_agr. yaig_gen_agr_sum — общая сумма соглашения. yaig_unused_limit — неиспользованный остаток. yaig_gen_agr_num — номер соглашения. yaig_cur_id — валюта. yaig_date_open / yaig_date_close — период действия. yaig_client_link → sys_company.id. Утилизация = (yaig_gen_agr_sum - yaig_unused_limit) / NULLIF(yaig_gen_agr_sum, 0) * 100.",
+    "example": "-- Генеральные соглашения с неиспользованным лимитом\nSELECT\n  ga.id,\n  ga.yaig_gen_agr_num,\n  ga.yaig_gen_agr_sum,\n  ga.yaig_unused_limit,\n  ROUND(\n    (ga.yaig_gen_agr_sum - COALESCE(ga.yaig_unused_limit, 0))\n    / NULLIF(ga.yaig_gen_agr_sum, 0) * 100, 2\n  )                      AS utilization_pct,\n  ga.yaig_date_close,\n  c.name                 AS client_name\nFROM yaig_client_gen_agr ga\nINNER JOIN sys_company c ON c.id = ga.yaig_client_link\nWHERE ga.status = 1\n  AND ga.yaig_date_close >= CURRENT_DATE\n  AND ga.yaig_unused_limit > 0\nORDER BY ga.yaig_unused_limit DESC NULLS LAST\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "cb_rate_history",
+    "pattern_type": "Ставка ЦБ. История ключевой ставки",
+    "description": "История изменений ключевой ставки ЦБ за период",
+    "use_case": "Актуальная ставка ЦБ, история ключевой ставки, ставка на дату",
+    "text": "Ставки ЦБ в cb_interest_rate. Поля: date_start_cb (дата начала действия), date_end_cb (дата окончания), grade_number_cb (значение ставки, numeric). Для актуальной ставки: WHERE date_start_cb <= CURRENT_DATE AND (date_end_cb IS NULL OR date_end_cb >= CURRENT_DATE). Для ставки на конкретную дату: WHERE date_start_cb <= $1 AND (date_end_cb IS NULL OR date_end_cb >= $1). Статус активных записей: status = 1.",
+    "example": "-- Актуальная ставка ЦБ на сегодня\nSELECT\n  id,\n  grade_number_cb   AS rate_pct,\n  date_start_cb,\n  date_end_cb\nFROM cb_interest_rate\nWHERE status = 1\n  AND date_start_cb <= CURRENT_DATE\n  AND (date_end_cb IS NULL OR date_end_cb >= CURRENT_DATE)\nORDER BY date_start_cb DESC\nLIMIT 1;\n\n-- История ставок за период\nSELECT\n  grade_number_cb   AS rate_pct,\n  date_start_cb,\n  date_end_cb\nFROM cb_interest_rate\nWHERE status = 1\n  AND date_start_cb >= $1\nORDER BY date_start_cb DESC\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "sys_state_lookup",
+    "pattern_type": "Справочник статусов. Поиск и список",
+    "description": "Получение состояний из справочника sys_state по имени или для конкретного типа объекта",
+    "use_case": "Все возможные статусы, найти id статуса по названию, список состояний",
+    "text": "Справочник состояний sys_state. Поля: id, name (русское название), afr_ident (системный идентификатор), afr_ord (порядок), afr_note (комментарий). Активные: status = 1. Поиск по имени: WHERE name ILIKE $1. По системному идентификатору: WHERE afr_ident = $1. Используется через JOIN с afp_state_id в большинстве таблиц GreenData. Для получения id состояния по имени: подзапрос SELECT id FROM sys_state WHERE name = $1.",
+    "example": "-- Все активные состояния\nSELECT id, name, afr_ident, afr_ord, afr_note\nFROM sys_state\nWHERE status = 1\nORDER BY afr_ord NULLS LAST, name\nLIMIT 200;\n\n-- Найти id состояния по имени\nSELECT id, name, afr_ident\nFROM sys_state\nWHERE name ILIKE '%' || $1 || '%'\n  AND status = 1\nORDER BY afr_ord NULLS LAST\nLIMIT 20;"
+  },
+  {
+    "pattern_id": "type_loan_list",
+    "pattern_type": "Справочник. Виды кредита",
+    "description": "Список видов кредита из справочника type_loan",
+    "use_case": "Все виды кредита, найти вид кредита по названию или идентификатору",
+    "text": "Справочник видов кредита type_loan. Поля: id, name, ident (системный идентификатор), ord (порядок). rel_submis_form — актуальность формы предоставления. seq_prod_number — порядковый номер субпродукта. Используется в scp_project_ans через loan_type_id, в scp_decision_quest через type_loan_id. Активные: status = 1.",
+    "example": "-- Все активные виды кредита\nSELECT id, name, ident, ord\nFROM type_loan\nWHERE status = 1\nORDER BY ord NULLS LAST, name\nLIMIT 100;\n\n-- Поиск вида кредита по названию\nSELECT id, name, ident\nFROM type_loan\nWHERE name ILIKE '%' || $1 || '%'\n  AND status = 1\nLIMIT 20;"
+  },
+  {
+    "pattern_id": "business_segment_list",
+    "pattern_type": "Справочник. Бизнес-сегменты",
+    "description": "Список сегментов бизнеса клиента",
+    "use_case": "Все бизнес-сегменты, найти сегмент по названию, код сегмента",
+    "text": "Справочник бизнес-сегментов business_segment. Поля: id, name, ident, type_int_code (внутренний код). Используется в sys_company через busines_segment_id и scp_application через scp_business_segment. Активные: status = 1. Для получения id по названию сегмента: подзапрос или прямой поиск по ident.",
+    "example": "-- Список всех бизнес-сегментов\nSELECT id, name, ident, type_int_code\nFROM business_segment\nWHERE status = 1\nORDER BY name\nLIMIT 50;\n\n-- Заявки и компании по сегменту (через JOIN)\nSELECT\n  bs.name        AS segment,\n  COUNT(DISTINCT c.id)   AS companies,\n  COUNT(sa.id)           AS applications\nFROM business_segment bs\nLEFT JOIN sys_company c     ON c.busines_segment_id = bs.id AND c.status = 1\nLEFT JOIN scp_application sa ON sa.scp_business_segment = bs.id AND sa.status = 1\nWHERE bs.status = 1\nGROUP BY bs.id, bs.name\nORDER BY applications DESC\nLIMIT 20;"
+  },
+  {
+    "pattern_id": "dict_product_by_segment",
+    "pattern_type": "Справочник продуктов. По бизнес-сегменту",
+    "description": "Продукты из справочника, доступные для определённого бизнес-сегмента",
+    "use_case": "Продукты для МСБ, доступные кредитные продукты по сегменту",
+    "text": "Справочник продуктов dict_product. Поле attr_business_segment → business_segment.id — привязка продукта к сегменту. Продукт используется в scp_decision_quest через app_product_id, в scp_amd_product через app_product_id, в product_pricing через app_product_id. Поле lending_type_id — тип кредитования. status = 1 для активных.",
+    "example": "-- Продукты доступные для бизнес-сегмента\nSELECT\n  dp.id,\n  dp.name,\n  dp.status\nFROM dict_product dp\nINNER JOIN business_segment bs ON bs.id = dp.attr_business_segment\nWHERE bs.ident = $1\n  AND dp.status = 1\n  AND COALESCE(dp.is_system, 0) = 0\nORDER BY dp.name\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "offices_psb_hierarchy",
+    "pattern_type": "Офисы ПСБ. Иерархия офисов",
+    "description": "Список офисов ПСБ с иерархией и привязкой к компании",
+    "use_case": "Все офисы банка, подчинённые офисы, офис с сотрудниками",
+    "text": "Офисы ПСБ в offices_psb. Поля: id, name, short_name, parent_org_id → offices_psb.id (родительский офис), org_company → sys_company.id (привязанная компания). Иерархия офисов через parent_org_id — аналог структуры подразделений. Статус: status = 1. Используется в sys_employee через ps_office и в заявках через ca_rout_office_id.",
+    "example": "-- Офисы ПСБ с количеством сотрудников\nSELECT\n  o.id,\n  o.name,\n  o.short_name,\n  COUNT(e.id)   AS employee_count\nFROM offices_psb o\nLEFT JOIN sys_employee e\n  ON e.ps_office = o.id AND e.status = 1\nWHERE o.status = 1\nGROUP BY o.id, o.name, o.short_name\nORDER BY employee_count DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "scp_sec_expertise_status",
+    "pattern_type": "СКП. Экспертиза СЭБ. Статус проверок",
+    "description": "Статус и результаты экспертизы СЭБ по заявкам",
+    "use_case": "Прошла ли заявка проверку СЭБ, результаты экспертизы безопасности",
+    "text": "Экспертиза СЭБ в scp_sec_expertise. Поля: scp_application_id → scp_application.id (заявка), emp_id → sys_employee.id (исполнитель), sec_end_date (дата завершения проверки), afp_state_id → sys_state.id (состояние экспертизы). expertise_obj_id → application_obj.id. Для проверки наличия завершённой экспертизы: WHERE sec_end_date IS NOT NULL. Результаты проверок в scp_sec_check_res через expertise_obj_id.",
+    "example": "-- Статус экспертизы СЭБ по заявкам за период\nSELECT\n  se.id,\n  se.create_date,\n  se.sec_end_date,\n  ss.name              AS expertise_state,\n  e.sur_name || ' ' || COALESCE(e.first_name, '') AS executor\nFROM scp_sec_expertise se\nINNER JOIN sys_state    ss ON ss.id = se.afp_state_id\nLEFT  JOIN sys_employee e  ON e.id  = se.emp_id\nWHERE se.scp_application_id = $1\n  AND se.status = 1\nORDER BY se.create_date DESC\nLIMIT 10;"
+  },
+  {
+    "pattern_id": "fs_file_by_object",
+    "pattern_type": "Файлы. Документы прикреплённые к объекту",
+    "description": "Список файлов прикреплённых к заявке или другому объекту",
+    "use_case": "Документы по заявке, прикреплённые файлы, список вложений",
+    "text": "Файлы в fs_file. Поля: id, name (имя файла), ff_type_id (тип файла), ff_body_size (размер в байтах), ff_note (примечание), ff_actual_end_date (дата актуальности), created_emp_id → sys_employee.id (кто загрузил). ff_parent_object → sys_object.id — родительский объект. Для получения файлов конкретной заявки нужен JOIN через obj_id. Поле ff_kind_id — вид файла. Активные: status = 1.",
+    "example": "-- Файлы прикреплённые к объекту\nSELECT\n  f.id,\n  f.name            AS file_name,\n  f.ff_note,\n  f.ff_body_size,\n  f.create_date,\n  f.ff_actual_end_date,\n  e.sur_name || ' ' || COALESCE(e.first_name, '') AS uploaded_by\nFROM fs_file f\nLEFT JOIN sys_employee e ON e.id = f.created_emp_id\nWHERE f.ff_parent_object = $1\n  AND f.status = 1\nORDER BY f.create_date DESC\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "product_pricing_details",
+    "pattern_type": "Ценообразование. Параметры ставки по продукту",
+    "description": "Параметры ценообразования (ставки, маржа) для продукта из заявки",
+    "use_case": "Предложенная ставка по кредиту, маржа, параметры ценообразования",
+    "text": "Ценообразование в product_pricing. Поля: scp_calc_rate_val (расчётная ставка), scp_min_margin_val (минимальная маржа), offer_margin_over — надбавка к марже. app_product_id → dict_product.id — продукт. owner_object_id → sys_object.id — владелец (заявка или проект решения). type_loan_id → type_loan.id — вид кредита. scp_is_individual — признак индивидуального ценообразования.",
+    "example": "-- Параметры ценообразования по заявке\nSELECT\n  pp.id,\n  pp.scp_calc_rate_val,\n  pp.scp_min_margin_val,\n  pp.offer_margin_over,\n  pp.scp_is_individual,\n  dp.name            AS product_name,\n  tl.name            AS loan_type\nFROM product_pricing pp\nLEFT JOIN dict_product dp ON dp.id = pp.app_product_id\nLEFT JOIN type_loan    tl ON tl.id = pp.type_loan_id\nWHERE pp.owner_object_id = $1\n  AND pp.status = 1\nORDER BY pp.create_date DESC\nLIMIT 10;"
+  },
+  {
+    "pattern_id": "collateral_app_list",
+    "pattern_type": "Залоговые заявки. Список по заявке",
+    "description": "Залоговые заявки прикреплённые к кредитной заявке",
+    "use_case": "Обеспечение по заявке, залоги, список залоговых заявок",
+    "text": "Залоговые заявки в scp_collateral_app. app_obj_id → application_obj.id — родительская заявка. coll_appl_type_id — тип залоговой заявки. pledge_concl_state_id → sys_state.id — состояние залогового заключения. emp_id → sys_employee.id — ответственный. scp_info_pledger_id → sys_company.id — залогодатель. scp_info_type_prod_id → dict_product.id — продукт. Статус: status = 1.",
+    "example": "-- Залоговые заявки по кредитной заявке\nSELECT\n  ca.id,\n  ca.create_date,\n  ca.coll_appl_type_id,\n  ss.name                AS pledge_state,\n  c.name                 AS pledger_name,\n  e.sur_name || ' ' || COALESCE(e.first_name, '') AS responsible\nFROM scp_collateral_app ca\nINNER JOIN sys_state    ss ON ss.id = ca.pledge_concl_state_id\nLEFT  JOIN sys_company  c  ON c.id  = ca.scp_info_pledger_id\nLEFT  JOIN sys_employee e  ON e.id  = ca.emp_id\nWHERE ca.app_obj_id = $1\n  AND ca.status = 1\nORDER BY ca.create_date DESC\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "decision_quest_by_app",
+    "pattern_type": "Вопросы на решение. По заявке",
+    "description": "Вопросы на принятие решения и параметры сублимитов по заявке",
+    "use_case": "Условия сделки, сублимиты, вопросы комитета по заявке",
+    "text": "Вопросы на принятие решения в scp_decision_quest. app_obj_id → application_obj.id — заявка. scp_project_ans_link → scp_project_ans.id — проект решения. scp_sublimit_sum — сумма сублимита. scp_sublimit_srok — срок сублимита. scp_sublimit_val — валюта. app_product_id → dict_product.id — продукт. type_loan_id / loan_type_id → type_loan.id — вид кредита. scp_subl_bor → sys_company.id — заёмщик по сублимиту.",
+    "example": "-- Вопросы на принятие решения по заявке\nSELECT\n  dq.id,\n  dq.scp_sublimit_sum,\n  dq.scp_sublimit_srok,\n  dq.scp_sublimit_purpose,\n  dp.name              AS product_name,\n  tl.name              AS loan_type,\n  c.name               AS borrower_name,\n  ss.name              AS state_name\nFROM scp_decision_quest dq\nLEFT JOIN dict_product dp ON dp.id = dq.app_product_id\nLEFT JOIN type_loan    tl ON tl.id = dq.loan_type_id\nLEFT JOIN sys_company  c  ON c.id  = dq.scp_subl_bor\nLEFT JOIN sys_state    ss ON ss.id = dq.scp_state_id\nWHERE dq.app_obj_id = $1\n  AND dq.status = 1\nORDER BY dq.create_date\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "corp_tech_app_list",
+    "pattern_type": "КТ. Заявки корпоративных технологий",
+    "description": "Список заявок КТ (корпоративных технологий) с фильтрацией",
+    "use_case": "Заявки КТ по компании, статистика КТ-заявок, список по состоянию",
+    "text": "Заявки корпоративных технологий в corp_tech_application. Структура аналогична scp_application: org_id → sys_company.id, afp_state_id → sys_state.id, emp_id → sys_employee.id (менеджер), initiator_id → sys_company.id (инициатор). Поле lim_sum — лимит. gsl_limit — лимит GSL. scp_business_segment → business_segment.id. Тестовые записи исключать: is_test != 1 (если поле есть).",
+    "example": "-- КТ-заявки компании за период\nSELECT\n  cta.id,\n  cta.create_date,\n  cta.lim_sum,\n  ss.name              AS state_name,\n  c.name               AS company_name,\n  e.sur_name || ' ' || COALESCE(e.first_name, '') AS manager\nFROM corp_tech_application cta\nINNER JOIN sys_state    ss ON ss.id = cta.afp_state_id\nINNER JOIN sys_company  c  ON c.id  = cta.org_id\nLEFT  JOIN sys_employee e  ON e.id  = cta.emp_id\nWHERE cta.org_id = $1\n  AND cta.status = 1\n  AND cta.create_date >= $2\nORDER BY cta.create_date DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "ic_mler_app_combined",
+    "pattern_type": "ИУ и МЮЭР. Заявки других продуктов",
+    "description": "Заявки ИУ (инвестиционного управления) и МЮЭР с фильтрацией",
+    "use_case": "ИУ-заявки, МЮЭР-заявки, заявки по инвестиционным продуктам",
+    "text": "Заявки ИУ (ic_application) и МЮЭР (mler_application) имеют аналогичную структуру: org_id, afp_state_id → sys_state.id, emp_id → sys_employee.id, initiator_id. В mler_application: app_product_id → dict_product.id — продукт, initiator_id → sys_company.id. Для сводного отчёта по всем типам заявок использовать UNION ALL с application_obj как базовой таблицей.",
+    "example": "-- ИУ-заявки по компании\nSELECT\n  ia.id,\n  ia.create_date,\n  ss.name              AS state_name,\n  c.name               AS company_name\nFROM ic_application ia\nINNER JOIN sys_state   ss ON ss.id = ia.afp_state_id\nINNER JOIN sys_company c  ON c.id  = ia.org_id\nWHERE ia.org_id = $1\n  AND ia.status = 1\nORDER BY ia.create_date DESC\nLIMIT 100;\n\n-- Все типы заявок по компании (UNION)\nSELECT 'SCP' AS app_type, id, create_date FROM scp_application      WHERE org_id = $1 AND status = 1\nUNION ALL\nSELECT 'CT',              id, create_date FROM corp_tech_application WHERE org_id = $1 AND status = 1\nUNION ALL\nSELECT 'IC',              id, create_date FROM ic_application         WHERE org_id = $1 AND status = 1\nUNION ALL\nSELECT 'MLER',            id, create_date FROM mler_application       WHERE org_id = $1 AND status = 1\nORDER BY create_date DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "dict_div_presence_stop",
+    "pattern_type": "Регионы присутствия. Стоп-регионы",
+    "description": "Список регионов с признаком стоп-региона для кредитования",
+    "use_case": "Запрещённые регионы, стоп-регионы для КО/КБКП, регионы присутствия банка",
+    "text": "Справочник регионов присутствия в dict_div_presence. Поля: nameregion (название региона), coderegion (код региона), stop_region (стоп-регион), stop_region_ko (стоп для КО), stop_region_fact (фактический стоп). Поле div_presence — наличие подразделения в регионе. Используется в заявках через deleg_region_id. Статус: status = 1.",
+    "example": "-- Стоп-регионы для кредитования\nSELECT\n  id,\n  nameregion,\n  coderegion,\n  stop_region,\n  stop_region_ko,\n  stop_region_fact,\n  div_presence\nFROM dict_div_presence\nWHERE status = 1\n  AND (\n    stop_region = 1\n    OR stop_region_ko = 1\n    OR stop_region_fact = 1\n  )\nORDER BY nameregion\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "scp_app_by_credit_technology",
+    "pattern_type": "СКП. Заявки по технологии кредитования",
+    "description": "Фильтрация заявок по технологии кредитования (credit_logic_id)",
+    "use_case": "Заявки по конкретной кредитной технологии, распределение по технологиям",
+    "text": "Технология кредитования в scp_application: credit_logic_id → scp_techcred.id. Поле lending_tech_id → scp_dict_tech_ctredit.id — технология кредитования. scp_tech_ctredit → scp_dict_tech_ctredit.id — техника кредита. Для группировки по технологиям: GROUP BY credit_logic_id с JOIN на scp_techcred. Поле cred_technology_str — текстовое название технологии (денормализованное поле).",
+    "example": "-- Заявки по технологии кредитования\nSELECT\n  sa.id,\n  sa.create_date,\n  sa.lim_sum,\n  sa.cred_technology_str  AS technology,\n  c.name                  AS company_name,\n  ss.name                 AS state_name\nFROM scp_application sa\nINNER JOIN sys_state   ss ON ss.id = sa.afp_state_id\nINNER JOIN sys_company c  ON c.id  = sa.org_id\nWHERE sa.credit_logic_id = $1\n  AND sa.status = 1\n  AND COALESCE(sa.is_test, 0) = 0\nORDER BY sa.create_date DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "scp_app_state_program",
+    "pattern_type": "СКП. Заявки по государственным программам",
+    "description": "Заявки с признаком государственной программы субсидирования",
+    "use_case": "Льготное кредитование, гос.программы, субсидированные заявки",
+    "text": "Государственные программы в scp_application: is_state_program (smallint, 1 = гос.программа). subsidy_prog_id — программа субсидирования (в credit_contract). scp_product_str — текстовое название продукта. is_cov_bank_garant — признак покрытия банковской гарантией. Фильтр: WHERE sa.is_state_program = 1.",
+    "example": "-- Заявки по государственным программам\nSELECT\n  sa.id,\n  sa.create_date,\n  sa.lim_sum,\n  sa.scp_product_str,\n  sa.is_cov_bank_garant,\n  c.name               AS company_name,\n  ss.name              AS state_name,\n  bs.name              AS segment\nFROM scp_application sa\nINNER JOIN sys_state      ss ON ss.id = sa.afp_state_id\nINNER JOIN sys_company    c  ON c.id  = sa.org_id\nLEFT  JOIN business_segment bs ON bs.id = sa.scp_business_segment\nWHERE sa.is_state_program = 1\n  AND sa.status = 1\nORDER BY sa.create_date DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "scp_app_manager_summary",
+    "pattern_type": "СКП. Сводка по менеджерам",
+    "description": "Количество и объём заявок в разбивке по ответственным менеджерам",
+    "use_case": "Показатели менеджеров, KPI по заявкам, лучшие менеджеры по объёму",
+    "text": "Аналитика по менеджерам через GROUP BY sa.emp_id с JOIN на sys_employee. COUNT заявок, SUM лимитов. Фильтровать тестовые заявки. Менеджер: sa.emp_id → sys_employee. Для ранжирования: ROW_NUMBER() OVER (ORDER BY total_limit DESC). Период: фильтр по create_date. Включать только записи где emp_id IS NOT NULL.",
+    "example": "-- Топ менеджеров по объёму заявок за период\nSELECT\n  e.id,\n  e.sur_name || ' ' || COALESCE(e.first_name, '')  AS manager_name,\n  dept.name                                          AS department,\n  COUNT(sa.id)                                       AS app_count,\n  SUM(sa.lim_sum)                                    AS total_limit\nFROM scp_application sa\nINNER JOIN sys_employee e    ON e.id    = sa.emp_id\nINNER JOIN sys_company  dept ON dept.id = e.org_id\nWHERE sa.status = 1\n  AND sa.create_date BETWEEN $1 AND $2\n  AND COALESCE(sa.is_test, 0) = 0\nGROUP BY e.id, e.sur_name, e.first_name, dept.name\nORDER BY total_limit DESC NULLS LAST\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "spa_raroc_analytics",
+    "pattern_type": "СКП. RAROC и доходность по проектам решений",
+    "description": "Анализ показателей доходности RAROC и взвешенной маржи",
+    "use_case": "RAROC по сделке, доходность кредита, взвешенная маржа, ROE",
+    "text": "Показатели доходности в scp_project_ans: raroc_roe (ROE), weighted_margin (взвешенная маржа), raroc_perc (RAROC в процентах). Поле is_risk_consideration — признак учёта риска. Для сводной аналитики: AVG(raroc_perc), AVG(weighted_margin) по сегменту или типу кредита. NULL-значения исключать через NULLIF или WHERE raroc_perc IS NOT NULL.",
+    "example": "-- Средние показатели доходности по типу кредита\nSELECT\n  tl.name                      AS loan_type,\n  COUNT(spa.id)                AS deal_count,\n  AVG(spa.raroc_perc)          AS avg_raroc_pct,\n  AVG(spa.weighted_margin)     AS avg_margin,\n  AVG(spa.raroc_roe)           AS avg_roe,\n  SUM(spa.exp_limit_credit_rub) AS total_limit\nFROM scp_project_ans spa\nLEFT JOIN type_loan tl ON tl.id = spa.loan_type_id\nWHERE spa.status = 1\n  AND spa.raroc_perc IS NOT NULL\n  AND spa.create_date BETWEEN $1 AND $2\nGROUP BY tl.id, tl.name\nORDER BY avg_raroc_pct DESC NULLS LAST\nLIMIT 20;"
+  },
+  {
+    "pattern_id": "cc_interest_rate_analysis",
+    "pattern_type": "Кредитные договоры. Анализ процентных ставок",
+    "description": "Статистика по процентным ставкам кредитного портфеля",
+    "use_case": "Средняя ставка по портфелю, ставки выше/ниже ключевой, распределение ставок",
+    "text": "Процентные ставки в credit_contract: cred_interest_rate (числовое поле). penalty_rate — штрафная ставка. Для сравнения с ключевой ставкой ЦБ: JOIN с cb_interest_rate по дате. cred_interest_rate - grade_number_cb — спред к ключевой ставке. Группировать по диапазонам ставок через CASE WHEN. Активные договора: is_closed = 0.",
+    "example": "-- Распределение ставок по диапазонам\nSELECT\n  CASE\n    WHEN cc.cred_interest_rate < 10  THEN 'до 10%'\n    WHEN cc.cred_interest_rate < 15  THEN '10-15%'\n    WHEN cc.cred_interest_rate < 20  THEN '15-20%'\n    ELSE '20% и выше'\n  END                          AS rate_range,\n  COUNT(cc.id)                 AS contract_count,\n  SUM(cc.credit_amount)        AS total_amount,\n  AVG(cc.cred_interest_rate)   AS avg_rate\nFROM credit_contract cc\nWHERE cc.status = 1\n  AND COALESCE(cc.is_closed, 0) = 0\n  AND cc.cred_interest_rate IS NOT NULL\nGROUP BY rate_range\nORDER BY avg_rate\nLIMIT 10;"
+  },
+  {
+    "pattern_id": "cc_by_loan_term",
+    "pattern_type": "Кредитные договоры. Разбивка по срокам",
+    "description": "Кредитный портфель в разбивке по срокам кредитования",
+    "use_case": "Краткосрочные vs долгосрочные кредиты, структура портфеля по срокам",
+    "text": "Срок кредита в credit_contract: loan_term (числовое поле, предположительно в месяцах). credit_start_date и credit_end_date — можно вычислить срок: AGE(credit_end_date, credit_start_date). Группировать по диапазонам через CASE WHEN. Отдельно считать просроченные внутри каждой группы через FILTER.",
+    "example": "-- Портфель по срокам кредитования\nSELECT\n  CASE\n    WHEN EXTRACT(MONTH FROM AGE(cc.credit_end_date, cc.credit_start_date)) <= 12  THEN 'до 1 года'\n    WHEN EXTRACT(MONTH FROM AGE(cc.credit_end_date, cc.credit_start_date)) <= 36  THEN '1-3 года'\n    WHEN EXTRACT(MONTH FROM AGE(cc.credit_end_date, cc.credit_start_date)) <= 60  THEN '3-5 лет'\n    ELSE 'более 5 лет'\n  END                                                    AS term_bucket,\n  COUNT(cc.id)                                           AS count,\n  SUM(cc.credit_amount)                                  AS total_amount,\n  COUNT(*) FILTER (WHERE cc.days_delay_number > 0)       AS overdue_count\nFROM credit_contract cc\nWHERE cc.status = 1\n  AND COALESCE(cc.is_closed, 0) = 0\n  AND cc.credit_start_date IS NOT NULL\n  AND cc.credit_end_date IS NOT NULL\nGROUP BY term_bucket\nORDER BY MIN(EXTRACT(MONTH FROM AGE(cc.credit_end_date, cc.credit_start_date)))\nLIMIT 10;"
+  },
+  {
+    "pattern_id": "emp_email_masked",
+    "pattern_type": "Сотрудники. Контакты с маскированием",
+    "description": "Получение контактных данных сотрудника с маскировкой чувствительных полей",
+    "use_case": "Email сотрудника, телефон, контактная информация с маскировкой",
+    "text": "SENSITIVE поля в sys_employee: email, phone, inner_emp_phone, birthday. При необходимости отображения маскировать: для email — показывать только домен или первые символы. Маскировка email: REGEXP_REPLACE(email, '(^[^@]{2}).*(@.*)', '\\1***\\2'). Телефон: оставлять последние 4 цифры. Включать только при явной необходимости и с маскировкой.",
+    "example": "-- Контакты сотрудников с маскировкой (только для авторизованных запросов)\nSELECT\n  e.id,\n  e.sur_name,\n  e.first_name,\n  e.pers_emp_number,\n  REGEXP_REPLACE(e.email, '(^[^@]{2}).*(@.*)', '\\1***\\2')  AS email_masked,\n  REGEXP_REPLACE(e.phone, '.*(\\d{4})$', '***-\\1')          AS phone_masked,\n  c.name    AS department\nFROM sys_employee e\nINNER JOIN sys_company c ON c.id = e.org_id\nWHERE e.org_id = $1\n  AND e.status = 1\n  AND COALESCE(e.is_locked, 0) = 0\nORDER BY e.sur_name\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "company_credit_exposure",
+    "pattern_type": "Компании. Кредитная нагрузка группы",
+    "description": "Совокупная кредитная нагрузка компании и всей группы компаний",
+    "use_case": "Общий долг группы, кредитная нагрузка холдинга, лимиты по группе",
+    "text": "Кредитная нагрузка группы компаний: объединить sys_company через group_company_link, затем LEFT JOIN с credit_contract. SUM(credit_amount) по всем членам группы. Дополнительно учитывать заявки (scp_application.lim_sum) в работе. COALESCE для нулевых значений. Поле sign_of_sme для МСБ-признака.",
+    "example": "-- Кредитная нагрузка всей группы компаний\nWITH group_members AS (\n  SELECT id, name, inn\n  FROM sys_company\n  WHERE (group_company_link = $1 OR id = $1)\n    AND status = 1\n)\nSELECT\n  gm.name,\n  gm.inn,\n  COUNT(cc.id)              AS contract_count,\n  COALESCE(SUM(cc.credit_amount), 0)  AS total_debt\nFROM group_members gm\nLEFT JOIN credit_contract cc\n  ON cc.link_customer_id = gm.id\n  AND cc.status = 1\n  AND COALESCE(cc.is_closed, 0) = 0\nGROUP BY gm.id, gm.name, gm.inn\nORDER BY total_debt DESC\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "acc_number_by_company",
+    "pattern_type": "Счета. Счета компании",
+    "description": "Список счетов привязанных к компании",
+    "use_case": "Все счета клиента, номера счетов компании, план счетов организации",
+    "text": "Счета компании в acc_number. Поле org_id → sys_company.id — привязка к компании. account_name — наименование счёта. name — код счёта. parent_acc → acc_number.id — родительский счёт. Для получения транзакций: JOIN с afhd_ac_trans_link через account_num_id = acc_number.id. Активные счета: status = 1.",
+    "example": "-- Все счета компании\nSELECT\n  a.id,\n  a.name           AS account_code,\n  a.account_name,\n  a.parent_acc,\n  a.create_date\nFROM acc_number a\nWHERE a.org_id = $1\n  AND a.status = 1\nORDER BY a.name\nLIMIT 200;"
+  },
+  {
+    "pattern_id": "trans_latest_balance_multi",
+    "pattern_type": "Транзакции. Остатки по нескольким счетам",
+    "description": "Актуальные остатки сразу по нескольким счетам на текущую дату",
+    "use_case": "Остатки по всем счетам компании, текущий баланс нескольких счетов",
+    "text": "Получение актуального баланса по нескольким счетам одним запросом. DISTINCT ON (account_num_id) ORDER BY account_num_id, account_date DESC — берёт последнюю строку для каждого счёта. Альтернатива: ROW_NUMBER() OVER (PARTITION BY account_num_id ORDER BY account_date DESC) = 1. Всегда фильтровать по account_num_id = ANY($1::bigint[]) или через JOIN с acc_number WHERE org_id = $1.",
+    "example": "-- Актуальные остатки по всем счетам компании\nSELECT DISTINCT ON (t.account_num_id)\n  t.account_num_id,\n  an.account_name,\n  an.name           AS account_code,\n  t.after_amount    AS current_balance,\n  t.account_date    AS balance_date\nFROM afhd_ac_trans_link t\nINNER JOIN acc_number an ON an.id = t.account_num_id\nWHERE an.org_id = $1\n  AND t.account_date <= CURRENT_DATE\n  AND COALESCE(t.is_excepted, 0) = 0\nORDER BY t.account_num_id, t.account_date DESC\nLIMIT 200;"
+  },
+  {
+    "pattern_id": "guarantee_summary_by_client",
+    "pattern_type": "Гарантии. Сводка по клиенту",
+    "description": "Полная сводка по гарантиям и генеральным соглашениям клиента",
+    "use_case": "Все гарантии клиента, объём гарантий, активные и истёкшие",
+    "text": "Полная картина гарантий клиента: объединить yaig_client_guarantee и yaig_client_gen_agr через yaig_client_link. Считать активные (yaig_date_close >= CURRENT_DATE) и истёкшие. Суммировать yaig_guar_summ для общего объёма. Для сводки по генеральному соглашению: GROUP BY yaig_prnt_gen_agr_id с SUM гарантий под каждым соглашением.",
+    "example": "-- Сводка по гарантиям и соглашениям клиента\nSELECT\n  ga.yaig_gen_agr_num           AS gen_agr_num,\n  ga.yaig_gen_agr_sum           AS agr_total_limit,\n  ga.yaig_unused_limit,\n  ga.yaig_date_close            AS agr_expires,\n  COUNT(g.id)                   AS guarantee_count,\n  SUM(g.yaig_guar_summ)         AS guarantees_total,\n  COUNT(g.id) FILTER (WHERE g.yaig_date_close >= CURRENT_DATE) AS active_count\nFROM yaig_client_gen_agr ga\nLEFT JOIN yaig_client_guarantee g ON g.yaig_prnt_gen_agr_id = ga.id AND g.status = 1\nWHERE ga.yaig_client_link = $1\n  AND ga.status = 1\nGROUP BY ga.id, ga.yaig_gen_agr_num, ga.yaig_gen_agr_sum,\n         ga.yaig_unused_limit, ga.yaig_date_close\nORDER BY ga.yaig_date_close\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "cb_rate_spread_analysis",
+    "pattern_type": "Ставка ЦБ. Спред к ключевой ставке",
+    "description": "Анализ спреда процентных ставок по договорам к ключевой ставке ЦБ",
+    "use_case": "Спред к ключевой ставке, превышение ключевой ставки, анализ ценообразования",
+    "text": "Спред к ключевой ставке: JOIN credit_contract с cb_interest_rate по дате. Условие пересечения: cc.credit_start_date BETWEEN cbr.date_start_cb AND COALESCE(cbr.date_end_cb, 'infinity'). Спред: cc.cred_interest_rate - cbr.grade_number_cb. Для текущих договоров — актуальная ставка ЦБ. AVG спреда по портфелю — показатель маржинальности.",
+    "example": "-- Спред ставок кредитного портфеля к ключевой ставке ЦБ\nSELECT\n  cc.id,\n  cc.credit_amount,\n  cc.cred_interest_rate,\n  cbr.grade_number_cb              AS cb_rate,\n  cc.cred_interest_rate - cbr.grade_number_cb AS spread,\n  c.name                           AS company_name\nFROM credit_contract cc\nINNER JOIN sys_company c ON c.id = cc.link_customer_id\nINNER JOIN cb_interest_rate cbr\n  ON cc.credit_start_date >= cbr.date_start_cb\n  AND (cbr.date_end_cb IS NULL OR cc.credit_start_date <= cbr.date_end_cb)\n  AND cbr.status = 1\nWHERE cc.status = 1\n  AND COALESCE(cc.is_closed, 0) = 0\n  AND cc.cred_interest_rate IS NOT NULL\nORDER BY spread DESC NULLS LAST\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "application_obj_all_types",
+    "pattern_type": "Заявки. Все типы через application_obj",
+    "description": "Единая точка входа для получения заявок всех типов через базовую таблицу",
+    "use_case": "Все заявки клиента независимо от типа, единый реестр заявок",
+    "text": "Базовая таблица заявок application_obj — родительская для scp_application, corp_tech_application, ic_application, mler_application. Поля: id, name, create_date, afp_state_id → sys_state.id, initiator_id, emp_id → sys_employee.id. Через application_obj можно получить все типы заявок единым запросом. Тип заявки определяется по наличию записи в дочерних таблицах через EXISTS или LEFT JOIN.",
+    "example": "-- Все заявки клиента через базовую таблицу\nSELECT\n  ao.id,\n  ao.create_date,\n  ao.name,\n  ss.name           AS state_name,\n  CASE\n    WHEN sa.id   IS NOT NULL THEN 'СКП'\n    WHEN cta.id  IS NOT NULL THEN 'КТ'\n    WHEN ia.id   IS NOT NULL THEN 'ИУ'\n    WHEN ma.id   IS NOT NULL THEN 'МЮЭР'\n    ELSE 'Другое'\n  END               AS app_type\nFROM application_obj ao\nINNER JOIN sys_state ss  ON ss.id = ao.afp_state_id\nLEFT  JOIN scp_application      sa  ON sa.id  = ao.id\nLEFT  JOIN corp_tech_application cta ON cta.id = ao.id\nLEFT  JOIN ic_application        ia  ON ia.id  = ao.id\nLEFT  JOIN mler_application      ma  ON ma.id  = ao.id\nWHERE ao.org_id = $1\n  AND ao.status = 1\nORDER BY ao.create_date DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "sec_check_results_summary",
+    "pattern_type": "Проверки СЭБ. Сводка результатов",
+    "description": "Сводка результатов проверок безопасности по заявкам",
+    "use_case": "Результаты проверки СЭБ, статистика проверок, антифрод",
+    "text": "Результаты проверок в scp_sec_check_res. expertise_obj_id → sys_object.id — проверяемый объект. sec_date_check — дата проверки. emp_id → sys_employee.id — исполнитель. tech_atr_bool — технический признак. is_hide_check_manual — скрытая ручная проверка. Для связи с заявкой: через scp_sec_expertise (expertise_obj_id → application_obj.id → scp_application.id). Считать число успешных/отказных проверок через флаги в participant_app (is_antifrod_success).",
+    "example": "-- Результаты проверок СЭБ для экспертизы\nSELECT\n  scr.id,\n  scr.sec_date_check,\n  scr.scp_cl_role_str,\n  scr.is_hide_check_manual,\n  e.sur_name || ' ' || COALESCE(e.first_name, '') AS checker\nFROM scp_sec_check_res scr\nLEFT JOIN sys_employee e ON e.id = scr.emp_id\nWHERE scr.expertise_obj_id = $1\n  AND scr.status = 1\nORDER BY scr.sec_date_check DESC\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "prod_commissions_by_product",
+    "pattern_type": "Комиссии. Список комиссий по продукту",
+    "description": "Комиссии и их размеры для продукта из заявки",
+    "use_case": "Комиссии по кредитному продукту, размер комиссий, условия комиссионного вознаграждения",
+    "text": "Комиссии продукта в prod_commissions. link_card_obj_id → sys_object.id — карточка продукта (заявка или проект решения). prod_comm_dict_id → scp_prod_comm_dict.id — тип комиссии. com_val_proc — размер в процентах. scp_comiss_size_str — текстовый размер. scp_payment_shedule_str — график оплаты. value_comment — комментарий. Статус: status = 1.",
+    "example": "-- Комиссии продукта по объекту\nSELECT\n  pc.id,\n  pc.com_val_proc,\n  pc.scp_comiss_size_str,\n  pc.scp_payment_shedule_str,\n  pc.value_comment\nFROM prod_commissions pc\nWHERE pc.link_card_obj_id = $1\n  AND pc.status = 1\nORDER BY pc.create_date\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "prod_guarantees_by_object",
+    "pattern_type": "Гарантии продукта. По карточке",
+    "description": "Требования по гарантиям обеспечения для конкретного продукта/заявки",
+    "use_case": "Требования по обеспечению, гарантии продукта, условия залога",
+    "text": "Гарантии продукта в prod_guarantees. link_card_obj_id → sys_object.id — объект. prod_guarant_dict_id → scp_prod_guarant_dict.id — тип гарантии. bank_val_proc — процентное значение. bank_val_sum — сумма. guarantee_type_id — тип. is_from_pricing — признак из ценообразования. Связан с product_pricing через объект.",
+    "example": "-- Гарантии обеспечения по продукту\nSELECT\n  pg.id,\n  pg.bank_val_proc,\n  pg.bank_val_sum,\n  pg.guarantee_type_id,\n  pg.is_from_pricing\nFROM prod_guarantees pg\nWHERE pg.link_card_obj_id = $1\n  AND pg.status = 1\nORDER BY pg.create_date\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "amd_product_summary",
+    "pattern_type": "РУМ. Продукты по проекту решения",
+    "description": "Продукты РУМ (расширенное управление мультисделками) по проекту решения",
+    "use_case": "Структура мультисделки, продукты РУМ, сублимиты по продуктам",
+    "text": "Продукты РУМ в scp_amd_product. amdp_parent_product_id → scp_amd_product.id — родительский продукт (дерево). app_product_id → dict_product.id — продукт. loan_type_id → type_loan.id — вид кредита. scp_sublimit_val — валюта. scp_general_amount — общая сумма. product_term — срок. test_amd_proj_link → scp_project_ans.id — связь с проектом решения. draft_dec_id → scp_decision_quest.id.",
+    "example": "-- Продукты РУМ по проекту решения\nSELECT\n  ap.id,\n  dp.name             AS product_name,\n  tl.name             AS loan_type,\n  ap.scp_general_amount,\n  ap.product_term,\n  ap.scp_sublimit_val\nFROM scp_amd_product ap\nLEFT JOIN dict_product dp ON dp.id = ap.app_product_id\nLEFT JOIN type_loan    tl ON tl.id = ap.loan_type_id\nWHERE ap.test_amd_proj_link = $1\n  AND ap.status = 1\nORDER BY ap.create_date\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "mler_app_by_product",
+    "pattern_type": "МЮЭР. Заявки по продукту",
+    "description": "МЮЭР-заявки с фильтром по кредитному продукту",
+    "use_case": "МЮЭР-заявки по продукту, статистика МЮЭР, объём по продукту",
+    "text": "МЮЭР-заявки в mler_application. app_product_id → dict_product.id — продукт. initiator_id → sys_company.id — инициатор/клиент. emp_id → sys_employee.id — ответственный. afp_state_id → sys_state.id — состояние. scp_business_segment → business_segment.id. Поле mler_signer_id → sys_employee.id — подписант. execut_admin_id → sys_employee.id — администратор исполнения.",
+    "example": "-- МЮЭР-заявки по продукту за период\nSELECT\n  ma.id,\n  ma.create_date,\n  dp.name              AS product_name,\n  c.name               AS company_name,\n  ss.name              AS state_name,\n  e.sur_name || ' ' || COALESCE(e.first_name, '') AS manager\nFROM mler_application ma\nINNER JOIN sys_state    ss ON ss.id = ma.afp_state_id\nINNER JOIN sys_company  c  ON c.id  = ma.initiator_id\nLEFT  JOIN dict_product dp ON dp.id = ma.app_product_id\nLEFT  JOIN sys_employee e  ON e.id  = ma.emp_id\nWHERE ma.app_product_id = $1\n  AND ma.status = 1\n  AND ma.create_date >= $2\nORDER BY ma.create_date DESC\nLIMIT 100;"
+  },
+  {
+    "pattern_id": "cross_all_apps_by_company",
+    "pattern_type": "Сводный реестр. Все продукты клиента",
+    "description": "Полный реестр всех кредитных продуктов компании: заявки, договоры, гарантии",
+    "use_case": "Полная кредитная история клиента, все продукты в одном запросе",
+    "text": "Сводный кредитный профиль клиента: объединить через UNION ALL данные из scp_application (активные заявки), credit_contract (договоры), yaig_client_guarantee (гарантии). Каждый тип — отдельный CTE или UNION со стандартизированными столбцами: тип продукта, сумма, дата начала, дата конца, состояние. Всегда LIMIT на финальном запросе.",
+    "example": "-- Полный реестр продуктов клиента\nSELECT\n  'Заявка СКП'    AS product_type,\n  sa.id,\n  sa.lim_sum      AS amount,\n  sa.create_date  AS start_date,\n  NULL::date      AS end_date,\n  ss.name         AS state\nFROM scp_application sa\nINNER JOIN sys_state ss ON ss.id = sa.afp_state_id\nWHERE sa.org_id = $1 AND sa.status = 1\n\nUNION ALL\n\nSELECT\n  'Кредитный договор',\n  cc.id,\n  cc.credit_amount,\n  cc.credit_start_date,\n  cc.credit_end_date,\n  ss.name\nFROM credit_contract cc\nINNER JOIN sys_state ss ON ss.id = cc.afp_state_id\nWHERE cc.link_customer_id = $1 AND cc.status = 1\n\nUNION ALL\n\nSELECT\n  'Гарантия',\n  g.id,\n  g.yaig_guar_summ,\n  g.yaig_date_open,\n  g.yaig_date_close,\n  'Активна'\nFROM yaig_client_guarantee g\nWHERE g.yaig_client_link = $1 AND g.status = 1\n\nORDER BY start_date DESC\nLIMIT 200;"
+  },
+  {
+    "pattern_id": "region_app_distribution",
+    "pattern_type": "Регионы. Распределение заявок по регионам",
+    "description": "Количество и объём заявок в разбивке по регионам присутствия банка",
+    "use_case": "Региональная статистика заявок, распределение по регионам, нагрузка офисов",
+    "text": "Региональная привязка заявок через deleg_region_id → dict_div_presence.id в scp_application. Поля dict_div_presence: nameregion, coderegion, stop_region. Группировать по region для региональной аналитики. Также офисная привязка через ca_rout_office_id → offices_psb.id. COALESCE для заявок без привязки к региону.",
+    "example": "-- Распределение заявок по регионам\nSELECT\n  COALESCE(ddp.nameregion, 'Не указан')   AS region,\n  ddp.coderegion,\n  COUNT(sa.id)                             AS app_count,\n  SUM(sa.lim_sum)                          AS total_limit\nFROM scp_application sa\nLEFT JOIN dict_div_presence ddp ON ddp.id = sa.deleg_region_id\nWHERE sa.status = 1\n  AND COALESCE(sa.is_test, 0) = 0\n  AND sa.create_date BETWEEN $1 AND $2\nGROUP BY ddp.id, ddp.nameregion, ddp.coderegion\nORDER BY app_count DESC\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "count_turnover_period_comparison",
+    "pattern_type": "ОСВ. Сравнение оборотов за два периода",
+    "description": "Сравнение дебетовых/кредитовых оборотов за два периода",
+    "use_case": "Динамика оборотов, сравнение с прошлым периодом, изменение сальдо",
+    "text": "Сравнение оборотов в count_turnover за два периода через два CTE или self-join. Фильтр первого периода: st_period >= $1 AND finish_period <= $2. Второго: st_period >= $3 AND finish_period <= $4. Считать разницу: current - previous. Положительная разница по дебету — рост расходов. Группировать по account_num_id для детализации по счетам.",
+    "example": "-- Сравнение оборотов по счёту за два периода\nWITH period1 AS (\n  SELECT account_num_id,\n         SUM(turnover_debit)  AS debit1,\n         SUM(turnover_credit) AS credit1\n  FROM count_turnover\n  WHERE link_cnt_owner = $1\n    AND st_period >= $2 AND finish_period <= $3\n  GROUP BY account_num_id\n),\nperiod2 AS (\n  SELECT account_num_id,\n         SUM(turnover_debit)  AS debit2,\n         SUM(turnover_credit) AS credit2\n  FROM count_turnover\n  WHERE link_cnt_owner = $1\n    AND st_period >= $4 AND finish_period <= $5\n  GROUP BY account_num_id\n)\nSELECT\n  an.account_name,\n  an.name            AS account_code,\n  COALESCE(p1.debit1, 0)   AS debit_period1,\n  COALESCE(p2.debit2, 0)   AS debit_period2,\n  COALESCE(p2.debit2, 0) - COALESCE(p1.debit1, 0) AS debit_change\nFROM acc_number an\nFULL OUTER JOIN period1 p1 ON p1.account_num_id = an.id\nFULL OUTER JOIN period2 p2 ON p2.account_num_id = an.id\nWHERE an.org_id = $1\nORDER BY ABS(COALESCE(p2.debit2, 0) - COALESCE(p1.debit1, 0)) DESC\nLIMIT 50;"
+  },
+  {
+    "pattern_id": "offices_psb_apps_by_office",
+    "pattern_type": "Офисы ПСБ. Заявки маршрутизированные в офис",
+    "description": "Заявки направленные на рассмотрение в конкретный офис ПСБ",
+    "use_case": "Заявки офиса, нагрузка на офис, маршрутизация заявок",
+    "text": "Маршрутизация заявок по офисам ПСБ через ca_rout_office_id → offices_psb.id в scp_application. Поле offices_psb: name, short_name, parent_org_id (иерархия). Для получения всех заявок офиса включая дочерние: WITH RECURSIVE по parent_org_id + JOIN. Статистика нагрузки: COUNT заявок и SUM лимитов по офису. Период фильтровать по create_date.",
+    "example": "-- Заявки направленные в офис\nSELECT\n  sa.id,\n  sa.create_date,\n  sa.lim_sum,\n  c.name              AS company_name,\n  ss.name             AS state_name,\n  o.name              AS office_name\nFROM scp_application sa\nINNER JOIN sys_state   ss ON ss.id = sa.afp_state_id\nINNER JOIN sys_company c  ON c.id  = sa.org_id\nINNER JOIN offices_psb o  ON o.id  = sa.ca_rout_office_id\nWHERE sa.ca_rout_office_id = \n  AND sa.status = 1\n  AND COALESCE(sa.is_test, 0) = 0\nORDER BY sa.create_date DESC\nLIMIT 100;"
   }
 ]
