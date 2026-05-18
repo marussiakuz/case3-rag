@@ -46,37 +46,21 @@ deploy:
     - mkdir -p ~/.ssh
     - ssh-keyscan -H "$YC_VM_HOST" >> ~/.ssh/known_hosts
   script:
-    # 1. Синхронизируем код (исключаем .venv, __pycache__, FAISS-файлы, .env)
     - |
       rsync -az --delete \
-        --exclude='.venv/' \
-        --exclude='__pycache__/' \
-        --exclude='*.pyc' \
-        --exclude='.env' \
-        --exclude='.git/' \
-        --exclude='.DS_Store' \
+        --exclude='.venv/' --exclude='__pycache__/' --exclude='*.pyc' \
+        --exclude='.env' --exclude='.git/' --exclude='.DS_Store' \
         --exclude='rag_pipeline/indices/' \
         . "$YC_VM_USER@$YC_VM_HOST:$APP_DIR/"
-
-    # 2. Кладём секреты в /etc/greendata/secrets на VM
-    - printf 'CEREBRAS_API_KEY=%s\nGROQ_API_KEY=%s\nPG_PASSWORD=%s\nPG_HOST=localhost\nPG_PORT=5432\nPG_USER=postgres\n'
-      "$CEREBRAS_API_KEY" "$GROQ_API_KEY" "$PG_PASSWORD"
-      | ssh "$YC_VM_USER@$YC_VM_HOST" "sudo tee /etc/greendata/secrets > /dev/null"
-
-    # 3. Определяем нужна ли пересборка RAG (изменился knowledge_base?)
+    - |
+      printf 'CEREBRAS_API_KEY=%s\nGROQ_API_KEY=%s\nPG_PASSWORD=%s\nPG_HOST=localhost\nPG_PORT=5432\nPG_USER=postgres\n' \
+        "$CEREBRAS_API_KEY" "$GROQ_API_KEY" "$PG_PASSWORD" | \
+        ssh "$YC_VM_USER@$YC_VM_HOST" "sudo tee /etc/greendata/secrets > /dev/null"
     - |
       REBUILD_RAG=false
-      if git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q 'rag_pipeline/knowledge_base'; then
-        REBUILD_RAG=true
-        echo "knowledge_base изменился — будет пересборка RAG-индексов"
-      fi
-
-    # 4. Запускаем post_deploy.sh на VM
-    - |
-      ssh "$YC_VM_USER@$YC_VM_HOST" \
-        "REBUILD_RAG=${REBUILD_RAG} bash $APP_DIR/deploy/post_deploy.sh"
-
-    - echo "✅ Деплой завершён. Приложение: http://$YC_VM_HOST"
+      git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q 'rag_pipeline/knowledge_base' && REBUILD_RAG=true || true
+      ssh "$YC_VM_USER@$YC_VM_HOST" "REBUILD_RAG=$REBUILD_RAG bash $APP_DIR/deploy/post_deploy.sh"
+    - echo "Deployed to http://$YC_VM_HOST"
   environment:
     name: production
     url: http://$YC_VM_HOST
