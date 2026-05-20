@@ -247,6 +247,14 @@ class GroqSecurityAuditor(SecurityAuditor):
                 print(f"  [Auditor] rate limit, жду {_wait}с...")
                 _time.sleep(_wait)
 
+        if response is None:
+            return AuditResult(
+                approved=False,
+                vulnerabilities=[],
+                overall_risk_score=5.0,
+                summary="Все попытки обращения к API завершились неудачей — запрос отклонён",
+            )
+
         usage = getattr(response, "usage", None)
         self.last_usage = {
             "prompt_tokens":     getattr(usage, "prompt_tokens",     0) or 0 if usage else 0,

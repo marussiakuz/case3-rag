@@ -252,6 +252,9 @@ class GroqSQLGenerator(SQLGenerator):
                 print(f"  [Generator] rate limit, жду {_wait}с...")
                 _time.sleep(_wait)
 
+        if response is None:
+            raise RuntimeError("Все попытки обращения к API завершились неудачей")
+
         usage = getattr(response, "usage", None)
         self.last_usage = {
             "prompt_tokens":     getattr(usage, "prompt_tokens",     0) or 0 if usage else 0,
