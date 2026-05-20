@@ -20,6 +20,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import os
+
+import torch
 from sentence_transformers import SentenceTransformer
 
 ROOT = Path(__file__).parent.parent
@@ -39,7 +42,16 @@ DEFAULT_TOP_K_PERFORMANCE = 3
 
 @lru_cache(maxsize=1)
 def _get_model() -> SentenceTransformer:
+    # используем все доступные CPU-ядра для инференса
+    n_threads = os.cpu_count() or 4
+    torch.set_num_threads(n_threads)
     return SentenceTransformer(MODEL_NAME)
+
+
+@lru_cache(maxsize=8)
+def _get_all_metadata(index_name: str) -> list[dict]:
+    """Метаданные индекса кешируются — они не меняются в рантайме."""
+    return load_all_metadata(index_name)
 
 
 # ── Поиск ─────────────────────────────────────────────────────────────────────
@@ -60,7 +72,7 @@ def _format_generation_context(results: list[dict], index_name: str = "generatio
     Собирает контекст для SQL-генератора.
     task_anchor результаты → подтягивают полную schema для этой таблицы.
     """
-    all_metadata = load_all_metadata(index_name)
+    all_metadata = _get_all_metadata(index_name)
     schema_by_table: dict[str, dict] = {
         m["table_name"]: m
         for m in all_metadata

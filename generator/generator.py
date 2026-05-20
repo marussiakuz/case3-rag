@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import httpx
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -28,7 +29,30 @@ from baseline1 import AuditResult, SQLGenerator
 from rag_pipeline.rag_tools import get_generation_context, get_solutions_context
 
 ROOT = Path(__file__).parent.parent
-MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+
+# Cerebras быстрее и без лимитов free-tier; OpenRouter — фолбэк для VM (geo-блок)
+# Несколько ключей Cerebras через запятую: CEREBRAS_API_KEYS=key1,key2,key3
+_CEREBRAS_KEYS: list[str] = [
+    k.strip()
+    for k in os.getenv("CEREBRAS_API_KEYS", os.getenv("CEREBRAS_API_KEY", "")).split(",")
+    if k.strip()
+]
+
+if _CEREBRAS_KEYS:
+    _API_BASE = "https://api.cerebras.ai/v1"
+    MODEL = os.getenv("CEREBRAS_MODEL", "qwen-3-235b-a22b-instruct-2507")
+else:
+    _API_BASE = "https://openrouter.ai/api/v1"
+    MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash:free")
+
+
+def _make_client(key: str) -> "OpenAI":
+    proxy = os.getenv("CEREBRAS_PROXY") if _CEREBRAS_KEYS else None
+    http = httpx.Client(proxy=proxy, timeout=60) if proxy else None
+    base = _API_BASE if _CEREBRAS_KEYS else "https://openrouter.ai/api/v1"
+    api_key = key if _CEREBRAS_KEYS else os.getenv("OPENROUTER_API_KEY")
+    return OpenAI(base_url=base, api_key=api_key, http_client=http)
+
 TEMPERATURE = 0.1
 MAX_TOKENS = 512  # SQL не длиннее 512 токенов — ограничивает thinking mode Qwen3
 
@@ -61,8 +85,9 @@ SYSTEM_PROMPT = """\
 4. Если в задаче явно указано конкретное значение (например, id = 100, статус = 1), вставляй его напрямую. Плейсхолдеры ($1, $2, ...) — только для значений, которые в задаче не указаны.
 5. Используй ТОЛЬКО таблицы и колонки из контекста схемы ниже — никаких других таблиц.
 6. Запрос должен быть читаемым: выравнивание, переносы строк.
-7. Выбирай ТОЛЬКО колонки, нужные для ответа на задачу: первичный ключ (id) + колонки, явно упомянутые или логически необходимые в задаче. Не добавляй лишние колонки «для информации».
+7. Выбирай колонки: первичный ключ (id) + все колонки, явно упомянутые в задаче + колонки из условий WHERE/фильтров, если они логически являются частью результата (например, если фильтруешь по status=1 — включи status в SELECT). Не добавляй служебные ключи внешних связей (type_id, org_id, created_emp_id) если задача о них явно не спрашивает.
 8. Если задача явно требует определённую технику SQL (оконные функции, CTE, подзапрос), используй именно её — не упрощай до GROUP BY или других подходов.
+9. Для имён объектов используй колонку `name` (не `name__ru`, не `name__en`), если задача не требует конкретный язык. Для дат создания — `create_date`, для дат изменения — `last_modified_date`.
 """
 
 
@@ -146,12 +171,12 @@ class GroqSQLGenerator(SQLGenerator):
         super().__init__(db_schema=db_schema, **kwargs)
         self.model = model
         self.temperature = temperature
-        self._client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=os.getenv("OPENROUTER_API_KEY"),
-        )
+        self._key_idx = 0
+        self._client = _make_client(_CEREBRAS_KEYS[0] if _CEREBRAS_KEYS else "")
         self.last_usage: dict = {}
-        print(f"  [Generator] модель: {self.model}")
+        proxy = os.getenv("CEREBRAS_PROXY") if _CEREBRAS_KEYS else None
+        backend = f"Cerebras×{len(_CEREBRAS_KEYS)}" + (" (proxy)" if proxy else "") if _CEREBRAS_KEYS else "OpenRouter"
+        print(f"  [Generator] {backend} · модель: {self.model}")
 
     def generate(
         self,
@@ -185,6 +210,7 @@ class GroqSQLGenerator(SQLGenerator):
         )
 
         import time as _time
+        response = None
         for _attempt in range(4):
             try:
                 response = self._client.chat.completions.create(
@@ -198,11 +224,29 @@ class GroqSQLGenerator(SQLGenerator):
                 )
                 break
             except Exception as _e:
+                err = str(_e)
+                _is_quota = "daily" in err.lower() or "token_limit" in err.lower() or "quota" in err.lower()
+                if _is_quota and _CEREBRAS_KEYS:
+                    if self._key_idx + 1 < len(_CEREBRAS_KEYS):
+                        # Следующий Cerebras-ключ
+                        self._key_idx += 1
+                        self._client = _make_client(_CEREBRAS_KEYS[self._key_idx])
+                        print(f"  [Generator] ключ исчерпан → ключ #{self._key_idx + 1}/{len(_CEREBRAS_KEYS)}")
+                        continue
+                    elif os.getenv("OPENROUTER_API_KEY"):
+                        # Все Cerebras-ключи исчерпаны → фолбэк на OpenRouter
+                        print("  [Generator] все Cerebras-ключи исчерпаны → OpenRouter фолбэк")
+                        self.model = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash:free")
+                        self._client = OpenAI(
+                            base_url="https://openrouter.ai/api/v1",
+                            api_key=os.getenv("OPENROUTER_API_KEY"),
+                        )
+                        continue
                 if _attempt == 3:
                     raise
-                _wait = 35
+                _wait = 5
                 try:
-                    _wait = int(str(_e).split("retry_after_seconds\": ")[1].split(",")[0].split(".")[0]) + 2
+                    _wait = int(err.split("retry_after_seconds\": ")[1].split(",")[0].split(".")[0]) + 2
                 except Exception:
                     pass
                 print(f"  [Generator] rate limit, жду {_wait}с...")

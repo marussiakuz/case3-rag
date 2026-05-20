@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import httpx
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -28,7 +29,27 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from baseline1 import AuditResult, SecurityAuditor, Vulnerability
 from rag_pipeline.rag_tools import get_security_context, get_sensitive_fields
 
-MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+# Cerebras быстрее и без лимитов free-tier; OpenRouter — фолбэк для VM (geo-блок)
+_CEREBRAS_KEYS: list[str] = [
+    k.strip()
+    for k in os.getenv("CEREBRAS_API_KEYS", os.getenv("CEREBRAS_API_KEY", "")).split(",")
+    if k.strip()
+]
+
+if _CEREBRAS_KEYS:
+    _API_BASE = "https://api.cerebras.ai/v1"
+    MODEL = os.getenv("CEREBRAS_MODEL", "qwen-3-235b-a22b-instruct-2507")
+else:
+    _API_BASE = "https://openrouter.ai/api/v1"
+    MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash:free")
+
+
+def _make_client(key: str) -> "OpenAI":
+    proxy = os.getenv("CEREBRAS_PROXY") if _CEREBRAS_KEYS else None
+    http = httpx.Client(proxy=proxy, timeout=60) if proxy else None
+    api_key = key if _CEREBRAS_KEYS else os.getenv("OPENROUTER_API_KEY")
+    return OpenAI(base_url=_API_BASE, api_key=api_key, http_client=http)
+
 TEMPERATURE = 0.0   # аудит должен быть детерминированным
 MAX_TOKENS = 512
 
@@ -151,10 +172,8 @@ class GroqSecurityAuditor(SecurityAuditor):
         super().__init__(**kwargs)
         self.model = model
         self.temperature = temperature
-        self._client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=os.getenv("OPENROUTER_API_KEY"),
-        )
+        self._key_idx = 0
+        self._client = _make_client(_CEREBRAS_KEYS[0] if _CEREBRAS_KEYS else "")
         self._sensitive_fields = get_sensitive_fields()
         self.last_usage: dict = {}
 
@@ -182,6 +201,7 @@ class GroqSecurityAuditor(SecurityAuditor):
         )
 
         import time as _time
+        response = None
         for _attempt in range(4):
             try:
                 response = self._client.chat.completions.create(
@@ -196,11 +216,27 @@ class GroqSecurityAuditor(SecurityAuditor):
                 )
                 break
             except Exception as _e:
+                err = str(_e)
+                _is_quota = "daily" in err.lower() or "token_limit" in err.lower() or "quota" in err.lower()
+                if _is_quota and _CEREBRAS_KEYS:
+                    if self._key_idx + 1 < len(_CEREBRAS_KEYS):
+                        self._key_idx += 1
+                        self._client = _make_client(_CEREBRAS_KEYS[self._key_idx])
+                        print(f"  [Auditor] ключ исчерпан → ключ #{self._key_idx + 1}/{len(_CEREBRAS_KEYS)}")
+                        continue
+                    elif os.getenv("OPENROUTER_API_KEY"):
+                        print("  [Auditor] все Cerebras-ключи исчерпаны → OpenRouter фолбэк")
+                        self.model = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash:free")
+                        self._client = OpenAI(
+                            base_url="https://openrouter.ai/api/v1",
+                            api_key=os.getenv("OPENROUTER_API_KEY"),
+                        )
+                        continue
                 if _attempt == 3:
                     raise
-                _wait = 35
+                _wait = 5
                 try:
-                    _wait = int(str(_e).split("retry_after_seconds\": ")[1].split(",")[0].split(".")[0]) + 2
+                    _wait = int(err.split("retry_after_seconds\": ")[1].split(",")[0].split(".")[0]) + 2
                 except Exception:
                     pass
                 print(f"  [Auditor] rate limit, жду {_wait}с...")

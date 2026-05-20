@@ -556,7 +556,7 @@
     "task_id": "corp_tech_application_10",
     "table": "corp_tech_application",
     "task": "Найти заявки, у которых сумма заявки выше средней по всем заявкам, с выводом клиента и менеджера, используя CTE.",
-    "reference_sql": "WITH avg_sum AS (SELECT AVG(lim_sum) AS mean_sum FROM corp_tech_application) SELECT cta.id, cta.lim_sum, sc.name__ru AS client, se.name__ru AS manager FROM corp_tech_application cta, avg_sum WHERE cta.lim_sum > avg_sum.mean_sum JOIN sys_company sc ON cta.initiator_id = sc.id JOIN sys_employee se ON cta.emp_id = se.id LIMIT 100;",
+    "reference_sql": "WITH avg_sum AS (SELECT AVG(lim_sum) AS mean_sum FROM corp_tech_application) SELECT cta.id, cta.lim_sum, sc.name__ru AS client, se.name__ru AS manager FROM corp_tech_application cta CROSS JOIN avg_sum JOIN sys_company sc ON cta.initiator_id = sc.id JOIN sys_employee se ON cta.emp_id = se.id WHERE cta.lim_sum > avg_sum.mean_sum LIMIT 100",
     "complexity": "complex"
   },
   {
@@ -682,7 +682,7 @@
     "task_id": "credit_contract_08",
     "table": "credit_contract",
     "task": "Определить для каждого состояния договора (afp_state_id) долю договоров с ручной мерой приостановления, используя CTE и оконные функции.",
-    "reference_sql": "WITH state_stats AS (SELECT afp_state_id, COUNT(*) FILTER (WHERE hand_suspension = 1) AS manual_susp_count, COUNT(*) AS total_count FROM credit_contract GROUP BY afp_state_id) SELECT afp_state_id, manual_susp_count, total_count, ROUND(COALESCE(manual_susp_count::FLOAT / NULLIF(total_count, 0), 0), 4) AS manual_ratio FROM state_stats ORDER BY manual_ratio DESC LIMIT 1000;",
+    "reference_sql": "WITH state_stats AS (SELECT afp_state_id, COUNT(*) FILTER (WHERE hand_suspension = 1) AS manual_susp_count, COUNT(*) AS total_count FROM credit_contract GROUP BY afp_state_id) SELECT afp_state_id, manual_susp_count, total_count, ROUND(COALESCE(manual_susp_count::NUMERIC / NULLIF(total_count, 0), 0), 4) AS manual_ratio FROM state_stats ORDER BY manual_ratio DESC LIMIT 1000",
     "complexity": "complex"
   },
   {
@@ -696,7 +696,7 @@
     "task_id": "credit_contract_10",
     "table": "credit_contract",
     "task": "Для каждого клиента вывести максимальную сумму кредита, которую он брал, и дату начала кредитования по этому договору, исключив закрытые договоры.",
-    "reference_sql": "SELECT link_customer_id, MAX(credit_amount) AS max_amount, MAX(credit_start_date) FILTER (WHERE credit_amount = MAX(credit_amount) OVER (PARTITION BY link_customer_id)) AS start_date FROM credit_contract WHERE is_closed = 0 GROUP BY link_customer_id ORDER BY max_amount DESC LIMIT 1000;",
+    "reference_sql": "WITH max_per_customer AS (SELECT link_customer_id, MAX(credit_amount) AS max_amount FROM credit_contract WHERE is_closed = 0 GROUP BY link_customer_id) SELECT cc.link_customer_id, mc.max_amount, MIN(cc.credit_start_date) AS start_date FROM credit_contract cc JOIN max_per_customer mc ON cc.link_customer_id = mc.link_customer_id AND cc.credit_amount = mc.max_amount WHERE cc.is_closed = 0 GROUP BY cc.link_customer_id, mc.max_amount ORDER BY mc.max_amount DESC LIMIT 1000",
     "complexity": "complex"
   },
   {
@@ -2026,7 +2026,7 @@
     "task_id": "offices_psb_10",
     "table": "offices_psb",
     "task": "Найти офисы, которые были открыты позже, чем средняя дата открытия всех офисов, используя подзапрос.",
-    "reference_sql": "SELECT id, office_name, office_date_from FROM offices_psb WHERE office_date_from > (SELECT AVG(office_date_from) FROM offices_psb) ORDER BY office_date_from LIMIT 1000;",
+    "reference_sql": "SELECT id, office_name, office_date_from FROM offices_psb WHERE office_date_from > (SELECT TO_TIMESTAMP(AVG(EXTRACT(EPOCH FROM office_date_from))) FROM offices_psb) ORDER BY office_date_from LIMIT 1000",
     "complexity": "complex"
   },
   {
@@ -2089,7 +2089,7 @@
     "task_id": "participant_app_09",
     "table": "participant_app",
     "task": "Определить участников, у которых успешность антифрод-проверки неизвестна (NULL), и присоединить данные экспертизы СЭБ.",
-    "reference_sql": "SELECT pa.id, pa.name, spse.sec_result FROM participant_app pa LEFT JOIN scp_part_sec_expertise spse ON pa.particip_sec_id = spse.id WHERE pa.is_antifrod_success IS NULL LIMIT 1000;",
+    "reference_sql": "SELECT pa.id, pa.name, spse.sec_ch_res_list FROM participant_app pa LEFT JOIN scp_part_sec_expertise spse ON pa.particip_sec_id = spse.id WHERE pa.is_antifrod_success IS NULL LIMIT 1000",
     "complexity": "complex"
   },
   {
@@ -2292,7 +2292,7 @@
     "task_id": "prod_guarantees_08",
     "table": "prod_guarantees",
     "task": "Определить гарантии, у которых размер годовых выше среднего по всем гарантиям, с присоединённым названием вида гарантии.",
-    "reference_sql": "WITH avg_rate AS (SELECT AVG(bank_val_proc) AS avg_proc FROM prod_guarantees) SELECT pg.id, pg.bank_val_proc, dict.name FROM prod_guarantees pg, avg_rate JOIN scp_prod_guarant_dict dict ON pg.prod_guarant_dict_id = dict.id WHERE pg.bank_val_proc > avg_rate.avg_proc LIMIT 1000;",
+    "reference_sql": "WITH avg_rate AS (SELECT AVG(bank_val_proc) AS avg_proc FROM prod_guarantees) SELECT pg.id, pg.bank_val_proc, dict.name FROM prod_guarantees pg JOIN scp_prod_guarant_dict dict ON pg.prod_guarant_dict_id = dict.id CROSS JOIN avg_rate WHERE pg.bank_val_proc > avg_rate.avg_proc LIMIT 1000",
     "complexity": "complex"
   },
   {
@@ -2495,14 +2495,14 @@
     "task_id": "scp_application_07",
     "table": "scp_application",
     "task": "Получить заявки с указанием имени ответственного менеджера (emp_id) из таблицы sys_employee.",
-    "reference_sql": "SELECT sa.id, sa.lim_sum, se.full_name FROM scp_application sa JOIN sys_employee se ON sa.emp_id = se.id ORDER BY sa.create_date DESC LIMIT 100;",
+    "reference_sql": "SELECT sa.id, sa.lim_sum, CONCAT(se.sur_name, ' ', se.first_name) AS full_name FROM scp_application sa JOIN sys_employee se ON sa.emp_id = se.id ORDER BY sa.create_date DESC LIMIT 100",
     "complexity": "medium"
   },
   {
     "task_id": "scp_application_08",
     "table": "scp_application",
     "task": "Найти топ-10 заявок с наибольшей суммой лимита, включая имя клиента и имя ответственного менеджера, используя CTE для объединения данных.",
-    "reference_sql": "WITH app_with_emp AS (SELECT sa.id, sa.lim_sum, sa.initiator_id, sa.emp_id, se.full_name AS manager_name FROM scp_application sa JOIN sys_employee se ON sa.emp_id = se.id), app_with_company AS (SELECT a.id, a.lim_sum, a.manager_name, sc.name AS company_name FROM app_with_emp a JOIN sys_company sc ON a.initiator_id = sc.id) SELECT id, lim_sum, company_name, manager_name FROM app_with_company ORDER BY lim_sum DESC LIMIT 10;",
+    "reference_sql": "WITH app_with_emp AS (SELECT sa.id, sa.lim_sum, sa.initiator_id, sa.emp_id, CONCAT(se.sur_name, ' ', se.first_name) AS manager_name FROM scp_application sa JOIN sys_employee se ON sa.emp_id = se.id), app_with_company AS (SELECT a.id, a.lim_sum, a.manager_name, sc.name AS company_name FROM app_with_emp a JOIN sys_company sc ON a.initiator_id = sc.id) SELECT id, lim_sum, company_name, manager_name FROM app_with_company ORDER BY lim_sum DESC LIMIT 10",
     "complexity": "complex"
   },
   {
@@ -2572,7 +2572,7 @@
     "task_id": "scp_collateral_app_08",
     "table": "scp_collateral_app",
     "task": "Для каждой заявки вывести имя исполнителя заключения и ранжировать заявки по дате подготовки заключения в рамках каждого состояния заключения.",
-    "reference_sql": "SELECT ca.id, e.full_name, ca.pledge_concl_state_id, ca.pledge_conclus_date, ROW_NUMBER() OVER (PARTITION BY ca.pledge_concl_state_id ORDER BY ca.pledge_conclus_date DESC) AS rn FROM scp_collateral_app ca JOIN sys_employee e ON ca.perform_hr_face_id = e.id WHERE ca.pledge_conclus_date IS NOT NULL LIMIT 1000;",
+    "reference_sql": "SELECT ca.id, CONCAT(e.sur_name, ' ', e.first_name) AS full_name, ca.pledge_concl_state_id, ca.pledge_conclus_date, ROW_NUMBER() OVER (PARTITION BY ca.pledge_concl_state_id ORDER BY ca.pledge_conclus_date DESC) AS rn FROM scp_collateral_app ca JOIN sys_employee e ON ca.perform_hr_face_id = e.id WHERE ca.pledge_conclus_date IS NOT NULL LIMIT 1000",
     "complexity": "complex"
   },
   {
@@ -2635,14 +2635,14 @@
     "task_id": "scp_decision_quest_07",
     "table": "scp_decision_quest",
     "task": "Найти все вопросы с прикреплёнными файлами и показать имя файла из связанной таблицы fs_file.",
-    "reference_sql": "SELECT q.id, q.name, f.filename FROM scp_decision_quest q JOIN fs_file f ON q.sys_file_id = f.id LIMIT 1000;",
+    "reference_sql": "SELECT q.id, q.name, f.name AS filename FROM scp_decision_quest q JOIN fs_file f ON q.sys_file_id = f.id LIMIT 1000",
     "complexity": "medium"
   },
   {
     "task_id": "scp_decision_quest_08",
     "table": "scp_decision_quest",
     "task": "Найти все вопросы, у которых утвержденная сумма выше средней, с ранжированием по убыванию суммы.",
-    "reference_sql": "WITH avg_sum AS (SELECT AVG(appr_sum) AS avg_appr_sum FROM scp_decision_quest) SELECT id, appr_sum, RANK() OVER (ORDER BY apppr_sum DESC) AS rank_sum FROM scp_decision_quest, avg_sum WHERE appr_sum > avg_appr_sum LIMIT 1000;",
+    "reference_sql": "WITH avg_sum AS (SELECT AVG(appr_sum) AS avg_appr_sum FROM scp_decision_quest) SELECT id, appr_sum, RANK() OVER (ORDER BY appr_sum DESC) AS rank_sum FROM scp_decision_quest CROSS JOIN avg_sum WHERE appr_sum > avg_appr_sum LIMIT 1000",
     "complexity": "complex"
   },
   {
@@ -3251,7 +3251,7 @@
     "task_id": "scp_project_ans_05",
     "table": "scp_project_ans",
     "task": "Получить список проектов решений с именем на русском и ФИО куратора ГО, используя связь с таблицей сотрудников.",
-    "reference_sql": "SELECT spa.id, spa.name__ru, se.full_name FROM scp_project_ans spa JOIN sys_employee se ON spa.curator_head_id = se.id LIMIT 100;",
+    "reference_sql": "SELECT spa.id, spa.name__ru, CONCAT(se.sur_name, ' ', se.first_name) AS full_name FROM scp_project_ans spa JOIN sys_employee se ON spa.curator_head_id = se.id LIMIT 100",
     "complexity": "medium"
   },
   {
@@ -3321,7 +3321,7 @@
     "task_id": "scp_sec_check_res_05",
     "table": "scp_sec_check_res",
     "task": "Показать проверки с именем на русском языке и соответствующими сотрудниками СЭБ, используя соединение с таблицей сотрудников.",
-    "reference_sql": "SELECT scr.id, scr.name__ru, se.full_name FROM scp_sec_check_res scr JOIN sys_employee se ON scr.emp_id = se.id ORDER BY scr.create_date DESC LIMIT 1000;",
+    "reference_sql": "SELECT scr.id, scr.name__ru, CONCAT(se.sur_name, ' ', se.first_name) AS full_name FROM scp_sec_check_res scr JOIN sys_employee se ON scr.emp_id = se.id ORDER BY scr.create_date DESC LIMIT 1000",
     "complexity": "medium"
   },
   {
@@ -3405,7 +3405,7 @@
     "task_id": "scp_sec_expertise_07",
     "table": "scp_sec_expertise",
     "task": "Показать экспертизы с именем на русском и именем ответственного сотрудника из sys_employee, используя связь по emp_id.",
-    "reference_sql": "SELECT e.id, e.name__ru, emp.full_name FROM scp_sec_expertise e JOIN sys_employee emp ON e.emp_id = emp.id LIMIT 1000;",
+    "reference_sql": "SELECT e.id, e.name__ru, CONCAT(emp.sur_name, ' ', emp.first_name) AS full_name FROM scp_sec_expertise e JOIN sys_employee emp ON e.emp_id = emp.id LIMIT 1000",
     "complexity": "medium"
   },
   {

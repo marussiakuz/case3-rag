@@ -52,10 +52,12 @@ deploy:
         --exclude='.venv/' --exclude='__pycache__/' --exclude='*.pyc' \
         --exclude='.env' --exclude='.git/' --exclude='.DS_Store' \
         --exclude='rag_pipeline/indices/' \
+        --exclude='validation/results.json' \
+        --exclude='query_history.json' \
         . "$YC_VM_USER@$YC_VM_HOST:$APP_DIR/"
     - |
-      printf 'CEREBRAS_API_KEY=%s\nGROQ_API_KEY=%s\nOPENROUTER_API_KEY=%s\nPG_PASSWORD=%s\nPG_HOST=localhost\nPG_PORT=5432\nPG_USER=postgres\n' \
-        "$CEREBRAS_API_KEY" "$GROQ_API_KEY" "$OPENROUTER_API_KEY" "$PG_PASSWORD" | \
+      printf 'CEREBRAS_API_KEYS=%s\nGROQ_API_KEY=%s\nOPENROUTER_API_KEY=%s\nPG_PASSWORD=%s\nPG_HOST=localhost\nPG_PORT=5432\nPG_USER=postgres\nCEREBRAS_PROXY=http://127.0.0.1:10809\n' \
+        "$CEREBRAS_API_KEYS" "$GROQ_API_KEY" "$OPENROUTER_API_KEY" "$PG_PASSWORD" | \
         ssh "$YC_VM_USER@$YC_VM_HOST" "sudo tee /etc/greendata/secrets > /dev/null"
     - |
       REBUILD_RAG=false

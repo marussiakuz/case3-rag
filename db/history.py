@@ -9,8 +9,26 @@ from typing import Any
 from db.connection import get_conn, put_conn
 
 
+def _ensure_iterations_column() -> None:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "ALTER TABLE query_history ADD COLUMN IF NOT EXISTS iterations_used INT DEFAULT 1"
+            )
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    finally:
+        put_conn(conn)
+
+
 def save_query(record: dict[str, Any]) -> None:
     """Сохраняет один запрос из UI в query_history."""
+    _ensure_iterations_column()
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -18,9 +36,9 @@ def save_query(record: dict[str, Any]) -> None:
                 """
                 INSERT INTO query_history
                     (query, sql, gen_time, tokens_total, risk_score,
-                     approved, summary, vulnerabilities, created_at)
+                     approved, summary, vulnerabilities, created_at, iterations_used)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
-                        to_timestamp(%s, 'DD.MM.YYYY HH24:MI:SS'))
+                        to_timestamp(%s, 'DD.MM.YYYY HH24:MI:SS'), %s)
                 """,
                 (
                     record.get("query", ""),
@@ -32,6 +50,7 @@ def save_query(record: dict[str, Any]) -> None:
                     record.get("summary", ""),
                     json.dumps(record.get("vulnerabilities", []), ensure_ascii=False),
                     record.get("timestamp", ""),
+                    record.get("iterations_used", 1),
                 ),
             )
         conn.commit()
@@ -41,6 +60,7 @@ def save_query(record: dict[str, Any]) -> None:
 
 def load_history(limit: int = 200) -> list[dict[str, Any]]:
     """Загружает историю запросов (новые сначала)."""
+    _ensure_iterations_column()
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -48,7 +68,8 @@ def load_history(limit: int = 200) -> list[dict[str, Any]]:
                 """
                 SELECT query, sql, gen_time, tokens_total, risk_score,
                        approved, summary, vulnerabilities,
-                       to_char(created_at, 'DD.MM.YYYY HH24:MI:SS') AS timestamp
+                       to_char(created_at, 'DD.MM.YYYY HH24:MI:SS') AS timestamp,
+                       COALESCE(iterations_used, 1) AS iterations_used
                 FROM query_history
                 ORDER BY created_at DESC
                 LIMIT %s
