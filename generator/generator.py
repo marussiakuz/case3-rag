@@ -226,7 +226,7 @@ class GroqSQLGenerator(SQLGenerator):
             except Exception as _e:
                 err = str(_e)
                 _is_quota = "daily" in err.lower() or "token_limit" in err.lower() or "quota" in err.lower()
-                if _is_quota and _CEREBRAS_KEYS:
+                if _is_quota and _CEREBRAS_KEYS and _attempt < 3:
                     if self._key_idx + 1 < len(_CEREBRAS_KEYS):
                         # Следующий Cerebras-ключ
                         self._key_idx += 1
