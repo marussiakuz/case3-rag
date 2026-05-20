@@ -907,7 +907,10 @@ with tab_dash:
 # ═══════════════════════════════════════════════════════════
 
 with tab_hist:
-    history = st.session_state.get("history", [])
+    try:
+        history = list(reversed(db_load_history(limit=200)))
+    except Exception:
+        history = st.session_state.get("history", [])
 
     if not history:
         st.markdown("""
