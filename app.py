@@ -960,63 +960,23 @@ with tab_hist:
             )
 
             query_escaped = _html.escape(query)
-            sql_escaped = _html.escape(sql)
-            st.markdown(f"""
-            <div class="result-item" style="margin-bottom:14px;">
-                <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
-                    <span style="font-size:12px;color:#7B8794;background:#F5F7FA;
-                                 border:1px solid #E8ECF0;border-radius:6px;padding:2px 8px;">
-                        #{n}
-                    </span>
-                    <span style="font-size:12px;color:#7B8794;">🕐 {ts}</span>
-                    {iter_badge}
-                </div>
-                <div style="font-size:13px;font-weight:600;color:#1A1A2E;
-                            word-break:break-word;line-height:1.55;margin-bottom:10px;">
-                    {query_escaped}
-                </div>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
-                    <span style="font-size:12px;background:#F5F7FA;border:1px solid #E8ECF0;
-                                 border-radius:8px;padding:4px 10px;color:#1A1A2E;">
-                        ⏱ {gen_time:.1f} с
-                    </span>
-                    <span style="font-size:12px;background:#F5F7FA;border:1px solid #E8ECF0;
-                                 border-radius:8px;padding:4px 10px;color:#1A1A2E;">
-                        🔢 {tokens_str} токенов
-                    </span>
-                    <span style="font-size:12px;border-radius:8px;padding:4px 10px;font-weight:600;
-                                 background:{risk_color}18;color:{risk_color};
-                                 border:1px solid {risk_color}44;">
-                        {risk_label} риск {risk:.1f}/10
-                    </span>
-                    <span style="font-size:12px;background:#F5F7FA;border:1px solid #E8ECF0;
-                                 border-radius:8px;padding:4px 10px;color:#1A1A2E;">
-                        {approved_icon} Аудит
-                    </span>
-                </div>
-                <details style="margin-bottom:4px;">
-                  <summary style="cursor:pointer;font-size:12px;color:#7B8794;
-                                  list-style:none;outline:none;user-select:none;
-                                  padding:4px 0;display:flex;align-items:center;gap:5px;">
-                    <span style="font-size:10px;">▶</span> Копировать текст задачи
-                  </summary>
-                  <textarea readonly rows="3"
-                    style="width:100%;margin-top:6px;padding:8px 10px;font-size:13px;
-                           font-family:'Inter',sans-serif;border:1px solid #E8ECF0;
-                           border-radius:8px;background:#F9FAFB;color:#1A1A2E;
-                           resize:vertical;line-height:1.5;box-sizing:border-box;"
-                    onclick="this.select()">{query_escaped}</textarea>
-                </details>
-                <details>
-                  <summary style="cursor:pointer;font-size:12px;color:#7B8794;
-                                  list-style:none;outline:none;user-select:none;
-                                  padding:4px 0;display:flex;align-items:center;gap:5px;">
-                    <span style="font-size:10px;">▶</span> Показать SQL
-                  </summary>
-                  <pre style="background:#1E1E2E;color:#E2E8F0;padding:14px 16px;
-                              border-radius:10px;font-size:12px;overflow-x:auto;
-                              margin-top:8px;font-family:'Courier New',monospace;
-                              line-height:1.6;">{sql_escaped}</pre>
-                </details>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="result-item" style="margin-bottom:6px;">'
+                f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">'
+                f'<span style="font-size:12px;color:#7B8794;background:#F5F7FA;border:1px solid #E8ECF0;border-radius:6px;padding:2px 8px;">#{n}</span>'
+                f'<span style="font-size:12px;color:#7B8794;">🕐 {ts}</span>'
+                f'{iter_badge}'
+                f'</div>'
+                f'<div style="font-size:13px;font-weight:600;color:#1A1A2E;word-break:break-word;line-height:1.55;margin-bottom:10px;">{query_escaped}</div>'
+                f'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px;">'
+                f'<span style="font-size:12px;background:#F5F7FA;border:1px solid #E8ECF0;border-radius:8px;padding:4px 10px;color:#1A1A2E;">⏱ {gen_time:.1f} с</span>'
+                f'<span style="font-size:12px;background:#F5F7FA;border:1px solid #E8ECF0;border-radius:8px;padding:4px 10px;color:#1A1A2E;">🔢 {tokens_str} токенов</span>'
+                f'<span style="font-size:12px;border-radius:8px;padding:4px 10px;font-weight:600;background:{risk_color}18;color:{risk_color};border:1px solid {risk_color}44;">{risk_label} риск {risk:.1f}/10</span>'
+                f'<span style="font-size:12px;background:#F5F7FA;border:1px solid #E8ECF0;border-radius:8px;padding:4px 10px;color:#1A1A2E;">{approved_icon} Аудит</span>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
+            if sql:
+                with st.expander("Показать SQL", expanded=False):
+                    st.code(sql, language="sql")
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)

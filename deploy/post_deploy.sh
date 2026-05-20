@@ -22,8 +22,22 @@ if [ "${REBUILD_RAG:-false}" = "true" ]; then
     .venv/bin/python rag_pipeline/build_indices.py
 fi
 
-echo "[post_deploy] Перезапуск сервиса..."
-sudo systemctl restart greendata
-sudo systemctl status greendata --no-pager -l
+# Не прерываем запущенную валидацию
+VALIDATION_RUNNING=false
+if [ -f "validation/progress.json" ]; then
+    VALIDATION_RUNNING=$(.venv/bin/python -c \
+        "import json; d=json.load(open('validation/progress.json')); print('true' if d.get('running') else 'false')" \
+        2>/dev/null || echo "false")
+fi
+
+if [ "$VALIDATION_RUNNING" = "true" ]; then
+    echo "[post_deploy] Валидация запущена — перезапуск сервиса отложен."
+    echo "[post_deploy] Новый код уже на диске. Перезапустите вручную после завершения валидации:"
+    echo "  sudo systemctl restart greendata"
+else
+    echo "[post_deploy] Перезапуск сервиса..."
+    sudo systemctl restart greendata
+    sudo systemctl status greendata --no-pager -l
+fi
 
 echo "[post_deploy] Готово."
