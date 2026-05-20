@@ -436,29 +436,39 @@ def render_audit_log(iterations_log: list[dict]) -> None:
     for it in iterations_log:
         ok = it.get("approved", False)
         risk = it.get("risk_score", 0.0)
-        label = f"Итерация {it['iteration']} — {'одобрен' if ok else 'отклонён'} · риск {risk:.1f}/10"
-        with st.expander(label, expanded=False):
-            vulns = it.get("vulnerabilities", [])
-            if vulns:
-                vuln_rows = "".join(
-                    f'<div style="font-size:12px;color:#DC2626;padding:2px 0;">'
-                    f'<b>[{v["class"]}]</b> риск {v["score"]}/10 — {v["desc"]}</div>'
-                    for v in vulns
-                )
-                st.markdown(
-                    f'<div style="background:#FEF2F2;border:1px solid #FECACA;'
-                    f'border-radius:8px;padding:8px 12px;">{vuln_rows}</div>',
-                    unsafe_allow_html=True,
-                )
-            elif ok:
-                st.success("Уязвимостей не обнаружено — запрос одобрен.")
-            summary = it.get("summary", "")
-            if summary:
-                st.caption(f"💬 {summary}")
-            sql_it = it.get("sql", "")
-            if sql_it and not ok:
-                with st.expander("SQL этой итерации", expanded=False):
-                    st.code(sql_it, language="sql")
+        border_color = "#059669" if ok else ("#D97706" if risk < 6 else "#DC2626")
+        status_text = "одобрен" if ok else "отклонён"
+        vulns = it.get("vulnerabilities", [])
+        summary = it.get("summary", "")
+        sql_it = it.get("sql", "")
+
+        vuln_html = ""
+        if vulns:
+            rows_html = "".join(
+                f'<div style="font-size:12px;color:#DC2626;padding:2px 0;">'
+                f'<b>[{v["class"]}]</b> риск {v["score"]}/10 — {v["desc"]}</div>'
+                for v in vulns
+            )
+            vuln_html = (
+                f'<div style="background:#FEF2F2;border:1px solid #FECACA;'
+                f'border-radius:8px;padding:8px 12px;margin-top:6px;">{rows_html}</div>'
+            )
+        summary_html = (
+            f'<div style="font-size:12px;color:#7B8794;margin-top:6px;">💬 {summary}</div>'
+            if summary else ""
+        )
+
+        st.markdown(
+            f'<div style="border:1px solid {border_color}44;border-radius:8px;'
+            f'padding:10px 14px;margin-bottom:8px;background:{border_color}08;">'
+            f'<div style="font-size:13px;font-weight:600;color:{border_color};">'
+            f'Итерация {it["iteration"]} — {status_text} · риск {risk:.1f}/10</div>'
+            f'{vuln_html}{summary_html}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        if sql_it and not ok:
+            st.code(sql_it, language="sql")
 
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
