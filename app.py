@@ -436,7 +436,7 @@ def render_audit_log(iterations_log: list[dict]) -> None:
     for it in iterations_log:
         ok = it.get("approved", False)
         risk = it.get("risk_score", 0.0)
-        label = f"{'✅' if ok else '❌'}  Итерация {it['iteration']} — риск {risk:.1f}/10"
+        label = f"Итерация {it['iteration']} — {'одобрен' if ok else 'отклонён'} · риск {risk:.1f}/10"
         with st.expander(label, expanded=False):
             vulns = it.get("vulnerabilities", [])
             if vulns:
