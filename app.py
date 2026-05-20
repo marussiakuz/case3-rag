@@ -942,11 +942,11 @@ with tab_hist:
             ts = item.get("timestamp", "—")
             query = item.get("query", "")
             sql = item.get("sql", "")
-            gen_time = item.get("gen_time", 0.0)
-            tokens = item.get("tokens_total", 0)
-            risk = item.get("risk_score", 0.0)
+            gen_time = float(item.get("gen_time") or 0.0)
+            tokens = int(item.get("tokens_total") or 0)
+            risk = float(item.get("risk_score") or 0.0)
             approved = item.get("approved", True)
-            iters = item.get("iterations_used", 1)
+            iters = int(item.get("iterations_used") or 1)
 
             risk_color = "#059669" if risk < 3.0 else "#D97706" if risk < 6.0 else "#DC2626"
             risk_label = "Низкий" if risk < 3.0 else "Средний" if risk < 6.0 else "Высокий"
