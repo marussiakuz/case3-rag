@@ -977,6 +977,5 @@ with tab_hist:
                 unsafe_allow_html=True,
             )
             if sql:
-                with st.expander("Показать SQL", expanded=False):
-                    st.code(sql, language="sql")
-            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+                st.code(sql, language="sql")
+            st.markdown("<hr style='margin:10px 0 14px 0;border:none;border-top:1px solid #E8ECF0;'>", unsafe_allow_html=True)
