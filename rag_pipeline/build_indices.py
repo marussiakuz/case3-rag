@@ -186,6 +186,22 @@ def build_security_index(model: SentenceTransformer) -> None:
                 "text": example_text,
             })
 
+        # Размеченные примеры из массива examples (ATTACK / SAFE / BORDERLINE)
+        for ex in vuln.get("examples", []):
+            ex_text = (
+                f"[{ex['label'].upper()}] {vuln['name']} (риск {vuln['risk_score']}/10).\n"
+                f"{ex['explanation']}\n"
+                f"SQL: {ex['sql']}"
+            )
+            documents.append({
+                "source": "vuln_example",
+                "vuln_class": vuln["vuln_class"],
+                "name": vuln["name"],
+                "risk_score": vuln["risk_score"],
+                "recommendation": vuln.get("recommendation", ""),
+                "text": ex_text,
+            })
+
     print(f"  → Документов по уязвимостям: {len(documents)}")
 
     texts = [d["text"] for d in documents]
