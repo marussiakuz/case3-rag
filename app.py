@@ -736,9 +736,16 @@ with tab_dash:
                 n_passed = int(sum(ea_vals))
                 n_errors = len([r for r in results if r.get("error")])
 
-                # Длительность прогона из progress.json (если есть)
+                # Длительность прогона из progress.json, фолбэк — последний прогон в БД
                 _prog = _read_progress()
                 _duration = _prog.get("duration_seconds") if _prog else None
+                if not _duration:
+                    try:
+                        from db.validation_runs import load_runs as _load_runs
+                        _last = _load_runs(limit=1)
+                        _duration = _last[0].get("duration_seconds") if _last else None
+                    except Exception:
+                        _duration = None
                 _dur_str = f"{int(_duration // 60)}м {int(_duration % 60)}с" if _duration else "—"
 
                 ea_color = "#3DC47A" if overall_ea >= 0.70 else "#D97706" if overall_ea >= 0.50 else "#DC2626"
