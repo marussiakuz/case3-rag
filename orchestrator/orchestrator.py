@@ -67,6 +67,10 @@ class GroqSQLSecuritySystem(SQLSecuritySystem):
         iterations_log: list[IterationLog] = []
         last_audit: AuditResult | None = None
 
+        # Уязвимости, при которых повтор бессмысленен:
+        # проблема в намерении пользователя, а не в конкретном SQL
+        TERMINAL_CLASSES = {"PROMPT_INJECTION", "FS_ACCESS", "PRIV_ESCALATE"}
+
         for iteration in range(1, self.max_iterations + 1):
             # Генерация
             sql = self.generator.generate(
@@ -102,6 +106,24 @@ class GroqSQLSecuritySystem(SQLSecuritySystem):
                     metadata={
                         "task_description": task_description,
                         "execution_time_seconds": round(elapsed, 2),
+                    },
+                )
+
+            # Терминальная уязвимость — повтор не поможет, останавливаемся
+            found_classes = {v.vuln_class for v in audit_result.vulnerabilities}
+            if found_classes & TERMINAL_CLASSES:
+                elapsed = time.time() - start_time
+                terminal = found_classes & TERMINAL_CLASSES
+                return SystemResult(
+                    final_sql=sql,
+                    approved=False,
+                    iterations_used=iteration,
+                    iterations_log=iterations_log,
+                    audit_log=_build_audit_log(task_description, iterations_log),
+                    metadata={
+                        "task_description": task_description,
+                        "execution_time_seconds": round(elapsed, 2),
+                        "failure_reason": f"terminal_vulnerability: {', '.join(terminal)}",
                     },
                 )
 
